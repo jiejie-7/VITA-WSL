@@ -1,5 +1,8 @@
 from collections import namedtuple
-from inspect import getargspec
+try:
+    from inspect import getfullargspec as getargspec
+except ImportError:  # Python < 3
+    from inspect import getargspec
 import numpy as np
 import torch
 from torch import optim
@@ -23,7 +26,7 @@ class Trainer(object):
         self.params = [p for p in self.policy_net.parameters()]
 
 
-    def get_episode(self, epoch):
+    def get_episode(self, epoch, deterministic=False):
         episode = []
         reset_args = getargspec(self.env.reset).args
         if 'epoch' in reset_args:
@@ -36,6 +39,13 @@ class Trainer(object):
             self.env.display()
         stat = dict()
         info = dict()
+        if hasattr(self.env, 'get_noise_info'):
+            noise_info = self.env.get_noise_info()
+            if isinstance(noise_info, dict):
+                info.update(noise_info)
+        initial_avail_actions = getattr(self.env, '_last_avail_actions', None)
+        if initial_avail_actions is not None:
+            info['avail_actions'] = initial_avail_actions
         switch_t = -1
 
         prev_hid = torch.zeros(1, self.args.nagents, self.args.hid_size)
@@ -72,9 +82,12 @@ class Trainer(object):
                 stat['density1'] = stat.get('density1', 0) + comm_density[0]
                 stat['density2'] = stat.get('density2', 0) + comm_density[1]               
             
-            action = select_action(self.args, action_out)
+            action = select_action(self.args, action_out, deterministic=deterministic)
             action, actual = translate_action(self.args, self.env, action)
             next_state, reward, done, info = self.env.step(actual)
+
+            if isinstance(info, dict) and 'action_fix_count' in info:
+                stat['action_fix_count'] = stat.get('action_fix_count', 0.0) + float(info.get('action_fix_count', 0.0))
 
             # store comm_action in info for next step
             if self.args.hard_attn and self.args.commnet:
@@ -96,6 +109,14 @@ class Trainer(object):
             stat['reward'] = stat.get('reward', 0) + reward[:self.args.nfriendly]
             if hasattr(self.args, 'enemy_comm') and self.args.enemy_comm:
                 stat['enemy_reward'] = stat.get('enemy_reward', 0) + reward[self.args.nfriendly:]
+
+            if isinstance(info, dict) and not hasattr(self.env, 'get_stat'):
+                if 'won' in info:
+                    stat['won'] = 1.0 if bool(info.get('won', False)) else 0.0
+                if 'battles_won' in info:
+                    stat['battles_won'] = float(info.get('battles_won', 0.0))
+                if 'battles_game' in info:
+                    stat['battles_game'] = float(info.get('battles_game', 0.0))
 
             done = done or t == self.args.max_steps - 1
 
@@ -143,10 +164,10 @@ class Trainer(object):
         n = self.args.nagents
         batch_size = len(batch.state)
 
-        rewards = torch.Tensor(batch.reward)
-        episode_masks = torch.Tensor(batch.episode_mask)
-        episode_mini_masks = torch.Tensor(batch.episode_mini_mask)
-        actions = torch.Tensor(batch.action)
+        rewards = torch.from_numpy(np.asarray(batch.reward, dtype=np.float32)).double()
+        episode_masks = torch.from_numpy(np.asarray(batch.episode_mask, dtype=np.float32)).double()
+        episode_mini_masks = torch.from_numpy(np.asarray(batch.episode_mini_mask, dtype=np.float32)).double()
+        actions = torch.from_numpy(np.asarray(batch.action, dtype=np.float32)).double()
         actions = actions.transpose(1, 2).view(-1, n, dim_actions)
 
         # old_actions = torch.Tensor(np.concatenate(batch.action, 0))
@@ -158,7 +179,7 @@ class Trainer(object):
         action_out = list(zip(*batch.action_out))
         action_out = [torch.cat(a, dim=0) for a in action_out]
 
-        alive_masks = torch.Tensor(np.concatenate([item['alive_mask'] for item in batch.misc])).view(-1)
+        alive_masks = torch.from_numpy(np.concatenate([item['alive_mask'] for item in batch.misc]).astype(np.float32)).double().view(-1)
 
         coop_returns = torch.Tensor(batch_size, n)
         ncoop_returns = torch.Tensor(batch_size, n)

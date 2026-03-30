@@ -1,0 +1,40 @@
+env:
+  env_name: smac
+  map_name: 3s5z
+  max_steps: 150
+
+train:
+  nprocesses: 8
+  num_epochs: 375
+  epoch_size: 10
+  batch_size: 4000 # 8 * 500
+  seed: 1
+  gamma: 1.0
+
+eval:
+  eval_interval: 20
+  eval_episodes: 32
+
+model:
+  hid_size: 64
+
+noise:
+  obs_noise_std: 0.0
+  packet_drop_prob: 0.0
+  malicious_agent_prob: 0.0
+  malicious_obs_noise_scale: 0.0
+  malicious_obs_mode: add
+  noise_warmup_steps: 50000
+  obs_noise_normalize: true
+
+comm_noise:
+  comm_noise_std: 0.0
+  comm_packet_drop_prob: 0.0
+  comm_malicious_agent_prob: 0.0
+  comm_malicious_noise_scale: 0.0
+  comm_malicious_mode: bernoulli
+  comm_malicious_fixed_agent_id: 0
+
+run:
+  save: true
+  run_dir: /home/jiejie/VITA/runs/MAGI

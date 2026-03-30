@@ -2,7 +2,36 @@ import time
 import numpy as np
 import torch
 from gym import spaces
-from inspect import getargspec
+try:
+    from inspect import getfullargspec as getargspec
+except ImportError:  # Python < 3
+    from inspect import getargspec
+
+
+def _sample_sender_mask(rng, n_agents, prob, mode="bernoulli", fixed_agent_id=0):
+    if rng is None or n_agents <= 0:
+        return None
+    prob = float(max(0.0, min(1.0, prob)))
+    if prob <= 0.0:
+        return None
+
+    mode = str(mode or "bernoulli").strip().lower()
+    if mode in {"fixed", "fixed_agent", "fixed_sender"}:
+        agent_id = int(fixed_agent_id)
+        if agent_id < 0 or agent_id >= n_agents:
+            agent_id = 0
+        mask = np.zeros((n_agents,), dtype=bool)
+        if prob >= 1.0 or rng.rand() < prob:
+            mask[agent_id] = True
+        return mask
+
+    if mode in {"one", "one_per_episode", "episode", "sample_one", "random_one"}:
+        mask = np.zeros((n_agents,), dtype=bool)
+        if prob >= 1.0 or rng.rand() < prob:
+            mask[int(rng.randint(0, n_agents))] = True
+        return mask
+
+    return (rng.rand(n_agents) < prob)
 
 class GymWrapper(object):
     '''
@@ -13,6 +42,7 @@ class GymWrapper(object):
         self.args = args
         self._noise_rng = np.random.RandomState()
         self._malicious_mask = None
+        self._comm_malicious_mask = None
         self._noise_step = 0
 
         self.obs_noise_std = 0.0
@@ -24,6 +54,9 @@ class GymWrapper(object):
         self.start_at_full_noise = False
         self.obs_noise_normalize = False
         self.obs_noise_norm_eps = 1e-6
+        self.comm_malicious_agent_prob = 0.0
+        self.comm_malicious_mode = "bernoulli"
+        self.comm_malicious_fixed_agent_id = 0
         self._obs_mean = None
         self._obs_M2 = None
         self._obs_count = 0
@@ -36,6 +69,9 @@ class GymWrapper(object):
             self.noise_warmup_steps = int(max(0, getattr(args, 'noise_warmup_steps', 0)))
             self.obs_noise_normalize = bool(getattr(args, 'obs_noise_normalize', False))
             self.obs_noise_norm_eps = float(getattr(args, 'obs_noise_norm_eps', 1e-6))
+            self.comm_malicious_agent_prob = float(getattr(args, 'comm_malicious_agent_prob', 0.0))
+            self.comm_malicious_mode = str(getattr(args, 'comm_malicious_mode', 'bernoulli')).lower()
+            self.comm_malicious_fixed_agent_id = int(getattr(args, 'comm_malicious_fixed_agent_id', 0))
             seed = getattr(args, 'seed', None)
             if seed is not None:
                 try:
@@ -96,6 +132,7 @@ class GymWrapper(object):
 
         obs = self._flatten_obs_numpy(obs)
         self._sample_malicious_mask(obs)
+        self._sample_comm_malicious_mask(obs)
         obs = self._apply_obs_noise(obs)
         self._last_noise_info = self._noise_info()
         obs = torch.from_numpy(obs).double()
@@ -163,6 +200,25 @@ class GymWrapper(object):
         if n_agents <= 0:
             return
         self._malicious_mask = (self._noise_rng.rand(n_agents) < eff_mal_prob)
+
+    def _sample_comm_malicious_mask(self, obs_arr):
+        self._comm_malicious_mask = None
+        coeff = self._noise_coeff()
+        eff_mal_prob = float(max(0.0, self.comm_malicious_agent_prob) * coeff)
+        if eff_mal_prob <= 0.0:
+            return
+        if obs_arr is None:
+            return
+        n_agents = obs_arr.shape[1] if obs_arr.ndim == 3 else obs_arr.shape[0]
+        if n_agents <= 0:
+            return
+        self._comm_malicious_mask = _sample_sender_mask(
+            self._noise_rng,
+            n_agents,
+            eff_mal_prob,
+            mode=self.comm_malicious_mode,
+            fixed_agent_id=self.comm_malicious_fixed_agent_id,
+        )
 
     def _update_obs_stats(self, view):
         if not self.obs_noise_normalize:
@@ -260,6 +316,8 @@ class GymWrapper(object):
         info = {}
         if self._malicious_mask is not None:
             info['malicious_mask'] = self._malicious_mask.copy()
+        if self._comm_malicious_mask is not None:
+            info['comm_malicious_mask'] = self._comm_malicious_mask.copy()
         return info
 
     def _inject_noise_info(self, info):
@@ -289,8 +347,12 @@ class SmacWrapper(object):
         self.episode_limit = int(getattr(env, "episode_limit", 0))
         self._noise_rng = np.random.RandomState()
         self._malicious_mask = None
+        self._comm_malicious_mask = None
         self._noise_step = 0
         self._stat = {}
+        self._last_battles_won = 0.0
+        self._last_battles_game = 0.0
+        self._last_avail_actions = None
 
         self.obs_noise_std = 0.0
         self.packet_drop_prob = 0.0
@@ -301,6 +363,9 @@ class SmacWrapper(object):
         self.start_at_full_noise = False
         self.obs_noise_normalize = False
         self.obs_noise_norm_eps = 1e-6
+        self.comm_malicious_agent_prob = 0.0
+        self.comm_malicious_mode = "bernoulli"
+        self.comm_malicious_fixed_agent_id = 0
         self._obs_mean = None
         self._obs_M2 = None
         self._obs_count = 0
@@ -314,6 +379,9 @@ class SmacWrapper(object):
             self.start_at_full_noise = bool(getattr(args, "start_at_full_noise", False))
             self.obs_noise_normalize = bool(getattr(args, "obs_noise_normalize", False))
             self.obs_noise_norm_eps = float(getattr(args, "obs_noise_norm_eps", 1e-6))
+            self.comm_malicious_agent_prob = float(getattr(args, "comm_malicious_agent_prob", 0.0))
+            self.comm_malicious_mode = str(getattr(args, "comm_malicious_mode", "bernoulli")).lower()
+            self.comm_malicious_fixed_agent_id = int(getattr(args, "comm_malicious_fixed_agent_id", 0))
             seed = getattr(args, "seed", None)
             if seed is not None:
                 try:
@@ -364,11 +432,13 @@ class SmacWrapper(object):
         self._stat = {}
         reset_args = getargspec(self.env.reset).args
         if "epoch" in reset_args:
-            obs, _, _ = self.env.reset(epoch)
+            obs, _, avail_actions = self.env.reset(epoch)
         else:
-            obs, _, _ = self.env.reset()
+            obs, _, avail_actions = self.env.reset()
+        self._last_avail_actions = avail_actions
         obs = self._flatten_obs_numpy(obs)
         self._sample_malicious_mask(obs)
+        self._sample_comm_malicious_mask(obs)
         obs = self._apply_obs_noise(obs)
         self._last_noise_info = self._noise_info()
         obs = torch.from_numpy(obs).double()
@@ -382,6 +452,7 @@ class SmacWrapper(object):
         action, avail_actions, fix_count = self._sanitize_actions(action)
 
         obs, _, rewards, dones, infos, next_avail = self.env.step(action)
+        self._last_avail_actions = next_avail
         self._noise_step += 1
         obs = self._flatten_obs_numpy(obs)
         obs = self._apply_obs_noise(obs)
@@ -447,13 +518,24 @@ class SmacWrapper(object):
 
     def _update_stat(self, infos):
         won = False
+        battles_won = self._last_battles_won
+        battles_game = self._last_battles_game
         if isinstance(infos, list) and infos:
             won = bool(infos[0].get("won", False))
             if "battles_won" in infos[0]:
-                self._stat["battles_won"] = float(infos[0]["battles_won"])
+                battles_won = float(infos[0]["battles_won"])
             if "battles_game" in infos[0]:
-                self._stat["battles_game"] = float(infos[0]["battles_game"])
+                battles_game = float(infos[0]["battles_game"])
+
+        delta_won = max(0.0, battles_won - self._last_battles_won)
+        delta_game = max(0.0, battles_game - self._last_battles_game)
+        self._last_battles_won = battles_won
+        self._last_battles_game = battles_game
+
+        self._stat["battles_won"] = delta_won
+        self._stat["battles_game"] = delta_game
         self._stat["success"] = 1.0 if won else 0.0
+        self._stat["won"] = 1.0 if won else 0.0
 
     def _sanitize_actions(self, actions):
         fix_count = 0
@@ -494,6 +576,25 @@ class SmacWrapper(object):
         if n_agents <= 0:
             return
         self._malicious_mask = (self._noise_rng.rand(n_agents) < eff_mal_prob)
+
+    def _sample_comm_malicious_mask(self, obs_arr):
+        self._comm_malicious_mask = None
+        coeff = self._noise_coeff()
+        eff_mal_prob = float(max(0.0, self.comm_malicious_agent_prob) * coeff)
+        if eff_mal_prob <= 0.0:
+            return
+        if obs_arr is None:
+            return
+        n_agents = obs_arr.shape[1] if obs_arr.ndim == 3 else obs_arr.shape[0]
+        if n_agents <= 0:
+            return
+        self._comm_malicious_mask = _sample_sender_mask(
+            self._noise_rng,
+            n_agents,
+            eff_mal_prob,
+            mode=self.comm_malicious_mode,
+            fixed_agent_id=self.comm_malicious_fixed_agent_id,
+        )
 
     def _update_obs_stats(self, view):
         if not self.obs_noise_normalize:
@@ -591,6 +692,10 @@ class SmacWrapper(object):
         info = {}
         if self._malicious_mask is not None:
             info["malicious_mask"] = self._malicious_mask.copy()
+        if self._comm_malicious_mask is not None:
+            info["comm_malicious_mask"] = self._comm_malicious_mask.copy()
+        if self._last_avail_actions is not None:
+            info["avail_actions"] = self._last_avail_actions
         return info
 
     def _inject_noise_info(self, info):

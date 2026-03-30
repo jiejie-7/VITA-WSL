@@ -24,14 +24,17 @@ class GRFWrapperEnv(gym.Env):
                          help="Number of controlled agents on the right side")  
         env.add_argument('--reward_type', type=str, default='scoring',
                          help="Reward type for training")
+        env.add_argument('--grf_representation', type=str, default='multiagent',
+                         help="Preferred GRF observation representation")
+        env.add_argument('--grf_fallback_representation', type=str, default='simple115v2',
+                         help="Fallback GRF observation representation when preferred one is unsupported")
         env.add_argument('--render', action="store_true", default=False,
                          help="Render training or testing process")
         
     def multi_agent_init(self, args):
-        self.env = grf_env.create_environment(
+        env_kwargs = dict(
             env_name=args.scenario,
             stacked=False,
-            representation='multiagent',
             rewards=args.reward_type,
             write_goal_dumps=False,
             write_full_episode_dumps=False,
@@ -41,14 +44,28 @@ class GRFWrapperEnv(gym.Env):
             extra_players=None,
             number_of_left_players_agent_controls=args.num_controlled_lagents,
             number_of_right_players_agent_controls=args.num_controlled_ragents,
-            channel_dimensions=(3, 3))
+            channel_dimensions=(3, 3),
+        )
+        preferred_rep = getattr(args, 'grf_representation', 'multiagent')
+        fallback_rep = getattr(args, 'grf_fallback_representation', 'simple115v2')
+        try:
+            self.env = grf_env.create_environment(representation=preferred_rep, **env_kwargs)
+            self.representation = preferred_rep
+        except ValueError as exc:
+            if preferred_rep == fallback_rep:
+                raise
+            if 'Unsupported representation' not in str(exc):
+                raise
+            print(f"[GRF] representation '{preferred_rep}' unsupported, fallback to '{fallback_rep}'")
+            self.env = grf_env.create_environment(representation=fallback_rep, **env_kwargs)
+            self.representation = fallback_rep
         self.num_controlled_lagents = args.num_controlled_lagents
         self.num_controlled_ragents = args.num_controlled_ragents
         self.num_controlled_agents = args.num_controlled_lagents + args.num_controlled_ragents
-        self.num_lagents = self.env.num_lteam_players
-        self.num_ragents = self.env.num_rteam_players
+        self.num_lagents = args.num_controlled_lagents
+        self.num_ragents = args.num_controlled_ragents
         if self.num_controlled_agents > 1:
-            action_space = gym.spaces.Discrete(self.env.action_space.nvec[1])
+            action_space = gym.spaces.Discrete(int(self.env.action_space.nvec[0]))
         else:
             action_space = self.env.action_space
         if self.num_controlled_agents > 1:
@@ -69,7 +86,7 @@ class GRFWrapperEnv(gym.Env):
    
     # check epoch arg
     def reset(self):
-        self.stat = dict()
+        self.stat = {'score_reward': 0.0, 'success': 0.0}
         obs = self.env.reset()
         if self.num_controlled_agents == 1:
             obs = obs.reshape(1, -1)
@@ -84,7 +101,12 @@ class GRFWrapperEnv(gym.Env):
         rewards = r
         dones = d
         infos = i
-        self.stat['success'] = infos['score_reward']
+        score_reward = 0.0
+        if isinstance(infos, dict):
+            score_reward = float(np.asarray(infos.get('score_reward', 0.0), dtype=np.float32).mean())
+        self.stat['score_reward'] = float(self.stat.get('score_reward', 0.0)) + score_reward
+        if score_reward > 0.0:
+            self.stat['success'] = 1.0
         
         return next_obs, rewards, dones, infos
         

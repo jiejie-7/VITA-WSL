@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import torch.nn.functional as F
 from torch import nn
 
@@ -37,6 +38,19 @@ class CommNetMLP(nn.Module):
             self.heads = nn.ModuleList([nn.Linear(args.hid_size, o)
                                         for o in args.naction_heads])
         self.init_std = args.init_std if hasattr(args, 'comm_init_std') else 0.2
+        self.comm_noise_std = float(getattr(args, 'comm_noise_std', 0.0))
+        self.comm_packet_drop_prob = float(getattr(args, 'comm_packet_drop_prob', 0.0))
+        self.comm_malicious_agent_prob = float(getattr(args, 'comm_malicious_agent_prob', 0.0))
+        self.comm_malicious_noise_scale = float(getattr(args, 'comm_malicious_noise_scale', 0.0))
+        self.comm_malicious_mode = str(getattr(args, 'comm_malicious_mode', 'bernoulli')).strip().lower()
+        self.comm_malicious_fixed_agent_id = int(getattr(args, 'comm_malicious_fixed_agent_id', 0))
+        seed = getattr(args, 'seed', None)
+        if seed is not None:
+            try:
+                seed = int(seed)
+            except Exception:
+                seed = None
+        self._comm_rng = np.random.RandomState(seed) if seed is not None and seed >= 0 else np.random.RandomState()
 
         # Mask for communication
         if self.args.comm_mask_zero:
@@ -192,6 +206,7 @@ class CommNetMLP(nn.Module):
 
             mask = mask.expand_as(comm)
             comm = comm * mask
+            comm = self._apply_comm_noise(comm, agent_mask, info)
 
             if hasattr(self.args, 'comm_mode') and self.args.comm_mode == 'avg' \
                 and num_agents_alive > 1:
@@ -202,6 +217,7 @@ class CommNetMLP(nn.Module):
             comm = comm * agent_mask
             # Mask communication to dead agents
             comm = comm * agent_mask_transpose
+            comm = self._apply_comm_drop(comm, agent_mask, agent_mask_transpose)
 
             # Combine all of C_j for an ith agent which essentially are h_j
             comm_sum = comm.sum(dim=1)
@@ -238,12 +254,142 @@ class CommNetMLP(nn.Module):
             action = (action_mean, action_log_std, action_std)
         else:
             # discrete actions
-            action = [F.log_softmax(head(h), dim=-1) for head in self.heads]
+            avail_actions = info.get('avail_actions') if isinstance(info, dict) else None
+            action = []
+            for head in self.heads:
+                logits = head(h)
+                logits = self._apply_avail_action_mask(logits, avail_actions)
+                action.append(F.log_softmax(logits, dim=-1))
 
         if self.args.recurrent:
             return action, value_head, (hidden_state.clone(), cell_state.clone())
         else:
             return action, value_head
+
+
+    def _apply_comm_noise(self, comm, agent_mask, info):
+        if (
+            self.comm_noise_std <= 0.0
+            and self.comm_malicious_noise_scale <= 0.0
+            and self.comm_malicious_agent_prob <= 0.0
+        ):
+            return comm
+        if self.comm_noise_std > 0.0:
+            comm = comm + torch.randn_like(comm) * float(self.comm_noise_std)
+        mal_mask = self._comm_malicious_mask(info, comm.size(0), comm.size(2), comm.device, comm.dtype, agent_mask)
+        if mal_mask is not None:
+            base_std = self.comm_noise_std if self.comm_noise_std > 0.0 else 1.0
+            std = float(max(1e-6, base_std) * max(0.0, self.comm_malicious_noise_scale))
+            if std > 0.0:
+                comm = comm + torch.randn_like(comm) * std * mal_mask
+        if agent_mask is not None:
+            comm = comm * agent_mask
+        return comm
+
+    def _comm_malicious_mask(self, info, batch_size, n, device, dtype, agent_mask=None):
+        mask = None
+        if isinstance(info, dict) and 'comm_malicious_mask' in info:
+            mask = info.get('comm_malicious_mask')
+        elif isinstance(info, dict) and 'malicious_mask' in info:
+            mask = info.get('malicious_mask')
+
+        if mask is None:
+            prob = float(self.comm_malicious_agent_prob)
+            if prob <= 0.0:
+                return None
+            prob = float(min(1.0, max(0.0, prob)))
+            mode = str(self.comm_malicious_mode or 'bernoulli').strip().lower()
+            if mode in {'fixed', 'fixed_agent', 'fixed_sender'}:
+                agent_id = int(self.comm_malicious_fixed_agent_id)
+                if agent_id < 0 or agent_id >= n:
+                    agent_id = 0
+                mask = np.zeros((batch_size, n), dtype=bool)
+                if prob >= 1.0:
+                    mask[:, agent_id] = True
+                else:
+                    active = self._comm_rng.rand(batch_size) < prob
+                    if active.any():
+                        mask[active, agent_id] = True
+            elif mode in {'one', 'one_per_episode', 'episode', 'sample_one', 'random_one'}:
+                mask = np.zeros((batch_size, n), dtype=bool)
+                if prob >= 1.0:
+                    active = np.ones((batch_size,), dtype=bool)
+                else:
+                    active = self._comm_rng.rand(batch_size) < prob
+                if active.any():
+                    env_sel = np.where(active)[0]
+                    agent_sel = self._comm_rng.randint(0, n, size=env_sel.size)
+                    mask[env_sel, agent_sel] = True
+            else:
+                mask = (self._comm_rng.rand(batch_size, n) < prob)
+
+        if torch.is_tensor(mask):
+            if mask.dim() == 1:
+                mask = mask.view(1, n).expand(batch_size, -1)
+            elif mask.dim() > 2:
+                mask = mask.view(batch_size, n)
+            if mask.size(0) != batch_size or mask.size(1) != n:
+                return None
+            mask = mask.to(device=device, dtype=dtype).view(batch_size, 1, n, 1)
+            mask = (mask > 0.5).to(dtype)
+        else:
+            mask = np.asarray(mask)
+            if mask.ndim == 1:
+                mask = np.broadcast_to(mask.reshape(1, n), (batch_size, n))
+            elif mask.ndim > 2:
+                mask = mask.reshape(batch_size, n)
+            if mask.shape != (batch_size, n):
+                return None
+            mask = torch.from_numpy(mask.astype(np.float64)).to(device=device, dtype=dtype).view(batch_size, 1, n, 1)
+
+        if agent_mask is not None:
+            sender_mask = (agent_mask[:, :1, :, :] > 0.5).to(dtype)
+            mask = mask * sender_mask
+        return mask
+
+    def _apply_comm_drop(self, comm, agent_mask, agent_mask_transpose):
+        if self.comm_packet_drop_prob <= 0.0:
+            return comm
+        valid = torch.ones(comm.shape[:-1], dtype=torch.bool, device=comm.device)
+        if agent_mask is not None:
+            valid = valid & (agent_mask.squeeze(-1) > 0.5)
+        if agent_mask_transpose is not None:
+            valid = valid & (agent_mask_transpose.squeeze(-1) > 0.5)
+
+        drop = self._comm_rng.rand(*valid.shape) < float(self.comm_packet_drop_prob)
+        for b in range(valid.shape[0]):
+            np.fill_diagonal(drop[b], False)
+        drop = drop & valid.detach().cpu().numpy()
+        if not drop.any():
+            return comm
+        keep = torch.from_numpy((~drop).astype(np.float64)).to(device=comm.device, dtype=comm.dtype).unsqueeze(-1)
+        return comm * keep
+
+    def _apply_avail_action_mask(self, logits, avail_actions):
+        if avail_actions is None:
+            return logits
+
+        mask = torch.as_tensor(avail_actions, dtype=logits.dtype, device=logits.device)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        if mask.dim() != 3:
+            return logits
+
+        if mask.size(0) == 1 and logits.size(0) > 1:
+            mask = mask.expand(logits.size(0), -1, -1)
+
+        if mask.size(0) != logits.size(0) or mask.size(1) != logits.size(1) or mask.size(2) != logits.size(2):
+            return logits
+
+        valid = mask > 0.5
+        all_invalid = ~valid.any(dim=-1, keepdim=True)
+        if all_invalid.any():
+            fallback = torch.zeros_like(valid)
+            fallback_idx = torch.argmax(logits, dim=-1, keepdim=True)
+            fallback.scatter_(-1, fallback_idx, True)
+            valid = torch.where(all_invalid, fallback, valid)
+
+        return logits.masked_fill(~valid, -1e10)
 
     def init_weights(self, m):
         if type(m) == nn.Linear:

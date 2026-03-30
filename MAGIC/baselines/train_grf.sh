@@ -1,5 +1,6 @@
 #!/bin/bash
 export OMP_NUM_THREADS=1
+export LD_PRELOAD=/lib/x86_64-linux-gnu/libffi.so.7
 
 python -u run_baselines.py \
   --env_name grf \

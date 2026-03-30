@@ -29,6 +29,7 @@ class VITAAgentConfig:
     enable_trust: bool = True
     enable_kl: bool = True
     vib_deterministic: bool = False
+    attention_only: bool = False
     trust_gate_floor: float = 0.0
     attn_bias_coef: float = 1.0
 
@@ -47,6 +48,7 @@ class VITAAgent(torch.nn.Module):
             cfg.kl_beta,
             cfg.attn_bias_coef,
             cfg.kl_free_bits,
+            attention_only=cfg.attention_only,
         )
         self.residual = GatedResidualBlock(cfg.hidden_dim)
         self.neighbor_norm = torch.nn.LayerNorm(cfg.hidden_dim)

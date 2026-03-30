@@ -1,0 +1,57 @@
+env:
+  env_name: smac
+  map_name: 3s5z
+  max_steps: 150
+
+train:
+  nprocesses: 8
+  num_epochs: 375
+  epoch_size: 10
+  batch_size: 500
+  seed: 2
+  gamma: 0.99
+  lrate: 0.0005
+  value_coeff: 0.01
+  mean_ratio: 1.0
+  detach_gap: 10000
+
+eval:
+  eval_interval: 20
+  eval_episodes: 32
+
+model:
+  hid_size: 128
+  directed: true
+  gat_num_heads: 4
+  gat_hid_size: 32
+  gat_num_heads_out: 1
+  ge_num_heads: 8
+  use_gat_encoder: true
+  gat_encoder_out_size: 32
+  self_loop_type1: 2
+  self_loop_type2: 2
+  learn_second_graph: true
+  first_gat_normalize: true
+  second_gat_normalize: true
+  message_decoder: true
+
+noise:
+  obs_noise_std: 0.0
+  packet_drop_prob: 0.0
+  malicious_agent_prob: 0.0
+  malicious_obs_noise_scale: 0.0
+  malicious_obs_mode: add
+  noise_warmup_steps: 50000
+  obs_noise_normalize: false
+
+comm_noise:
+  comm_noise_std: 0.0
+  comm_packet_drop_prob: 0.0
+  comm_malicious_agent_prob: 0.0
+  comm_malicious_noise_scale: 0.0
+  comm_malicious_mode: bernoulli
+  comm_malicious_fixed_agent_id: 0
+
+run:
+  save: true
+  run_dir: /home/jiejie/VITA/runs/MAGIC

@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch.autograd import Variable
 
+
 def parse_action_args(args):
     if args.num_actions[0] > 0:
         # environment takes discrete action
@@ -24,16 +25,35 @@ def parse_action_args(args):
             raise RuntimeError("--nactions wrong format!")
 
 
-def select_action(args, action_out):
+def select_action(args, action_out, deterministic=False):
     if args.continuous:
         action_mean, _, action_std = action_out
-        action = torch.normal(action_mean, action_std)
+        if deterministic:
+            action = action_mean
+        else:
+            action = torch.normal(action_mean, action_std)
         return action.detach()
-    else:
-        log_p_a = action_out
-        p_a = [[z.exp() for z in x] for x in log_p_a]
-        ret = torch.stack([torch.stack([torch.multinomial(x, 1).detach() for x in p]) for p in p_a])
-        return ret
+
+    log_p_a = action_out
+    p_a = [[z.exp() for z in x] for x in log_p_a]
+    sampled = []
+    for p in p_a:
+        per_head = []
+        for probs in p:
+            probs_sum = probs.sum()
+            invalid_probs = (
+                (not torch.isfinite(probs_sum))
+                or probs_sum.item() <= 0.0
+                or (not torch.isfinite(probs).all())
+            )
+            if deterministic or invalid_probs:
+                act = torch.argmax(probs, dim=-1, keepdim=True).detach()
+            else:
+                act = torch.multinomial(probs, 1).detach()
+            per_head.append(act)
+        sampled.append(torch.stack(per_head))
+    return torch.stack(sampled)
+
 
 def translate_action(args, env, action):
     if args.num_actions[0] > 0:

@@ -7,6 +7,7 @@ import signal
 import argparse
 import os
 import random
+import shutil
 import socket
 from contextlib import closing
 from pathlib import Path
@@ -327,6 +328,12 @@ if args.env_name in ('smac', 'starcraft2'):
 args.obs_size = env.observation_dim
 args.num_actions = env.num_actions
 
+if hasattr(env, 'close'):
+    try:
+        env.close()
+    except Exception:
+        pass
+
 # Multi-action
 if not isinstance(args.num_actions, (list, tuple)): # single action case
     args.num_actions = [args.num_actions]
@@ -350,11 +357,16 @@ if not args.display:
 for p in policy_net.parameters():
     p.data.share_memory_()
 
-disp_args = _make_env_args(args, rank=0, eval_env=False)
-disp_trainer = Trainer(disp_args, policy_net, data.init(disp_args.env_name, disp_args, False))
-disp_trainer.display = True
+disp_trainer = None
+if args.display:
+    disp_args = _make_env_args(args, rank=0, eval_env=False)
+    disp_trainer = Trainer(disp_args, policy_net, data.init(disp_args.env_name, disp_args, False))
+    disp_trainer.display = True
+
 def disp():
-    x = disp_trainer.get_episode()
+    if disp_trainer is None:
+        return
+    x = disp_trainer.get_episode(0)
 
 if args.env_name == 'grf':
     args.render = render
@@ -392,15 +404,16 @@ if args.plot:
     vis = visdom.Visdom(env=args.plot_env, port=args.plot_port)
 
 repo_root = Path(__file__).resolve().parents[1]
-default_root = repo_root / 'runs' / 'MAGIC'
-base_dir = Path(args.run_dir) if args.run_dir else default_root
+default_root = repo_root / 'runs'
+base_root = Path(args.run_dir) if args.run_dir else default_root
+algo_root = base_root if base_root.name.lower() == 'magic' else (base_root / 'MAGIC')
 
 if args.env_name in ('smac', 'starcraft2'):
-    model_dir = base_dir / 'smac' / args.map_name
+    model_dir = algo_root / 'smac' / args.map_name
 elif args.env_name == 'grf':
-    model_dir = base_dir / args.env_name / args.scenario
+    model_dir = algo_root / args.env_name / args.scenario
 else:
-    model_dir = base_dir / args.env_name
+    model_dir = algo_root / args.env_name
 
 if not model_dir.exists():
     curr_run = 'run1'
@@ -414,6 +427,19 @@ else:
         curr_run = 'run%i' % (max(exst_run_nums) + 1)
 run_dir = model_dir / curr_run
 os.makedirs(run_dir, exist_ok=True)
+
+
+def _save_run_metadata():
+    args_dict = dict(vars(args))
+    with (run_dir / "args.json").open("w", encoding="utf-8") as f:
+        json.dump(args_dict, f, ensure_ascii=False, indent=2)
+    if args.config:
+        cfg_path = Path(args.config)
+        if cfg_path.exists():
+            shutil.copy2(cfg_path, run_dir / "config.yaml")
+
+
+_save_run_metadata()
 
 def _to_scalar(val):
     if isinstance(val, (list, tuple)):
@@ -443,30 +469,39 @@ def run_eval(update_idx, total_env_steps):
         return None
     episodes = int(max(1, args.eval_episodes))
     policy_net.eval()
-    success_sum = 0.0
+    won_sum = 0.0
     reward_sum = 0.0
+    score_reward_sum = 0.0
     with torch.no_grad():
         for _ in range(episodes):
-            _, stat = eval_trainer.get_episode(update_idx)
-            success_sum += float(stat.get("success", 0))
+            _, stat = eval_trainer.get_episode(update_idx, deterministic=True)
+            won_sum += float(stat.get("won", stat.get("success", 0.0)))
             reward_sum += _to_scalar(stat.get("reward", 0.0))
-    success_rate = success_sum / float(episodes)
+            score_reward_sum += _to_scalar(stat.get("score_reward", stat.get("success", 0.0)))
+    eval_win_rate = won_sum / float(episodes)
     eval_reward = reward_sum / float(episodes)
-    print("Eval@{} Success: {:.4f} ({}/{})".format(update_idx, success_rate, int(success_sum), episodes))
+    eval_score_reward = score_reward_sum / float(episodes)
+    if args.env_name == 'grf':
+        print("Eval@{} Success: {:.4f} ({}/{})".format(update_idx, eval_win_rate, int(won_sum), episodes))
+        print("Eval@{} ScoreReward: {:.4f}".format(update_idx, eval_score_reward))
+    else:
+        print("Eval@{} WinRate: {:.4f} ({}/{})".format(update_idx, eval_win_rate, int(won_sum), episodes))
     _append_log({
         "time": time.time(),
         "phase": "eval",
         "update": update_idx,
         "total_env_steps": total_env_steps,
-        "eval_win_rate": success_rate,
+        "eval_win_rate": eval_win_rate,
         "eval_episode_reward": eval_reward,
+        "eval_score_reward": eval_score_reward,
         "step": update_idx,
     })
     if args.save:
         with (run_dir / "eval.log").open("a", encoding="utf-8") as f:
-            f.write("{}\t{:.6f}\t{}\n".format(update_idx, success_rate, episodes))
+            metric = eval_win_rate
+            f.write("{}\t{:.6f}\t{}\n".format(update_idx, metric, episodes))
     policy_net.train()
-    return success_rate
+    return eval_win_rate
 
 
 def run(num_epochs): 
@@ -488,23 +523,36 @@ def run(num_epochs):
             batch_episodes = int(s.get("num_episodes", 0))
             reward_mean = _to_scalar(s.get("reward", 0.0))
             episode_reward = reward_mean / float(max(1, batch_episodes))
-            success_sum = _to_scalar(s.get("success", 0.0))
-            incre_win_rate = success_sum / float(max(1, batch_episodes))
+            score_reward = _to_scalar(s.get("score_reward", s.get("success", 0.0))) / float(max(1, batch_episodes))
+            won_count = _to_scalar(s.get("won", s.get("success", 0.0)))
+            won_flag_rate = won_count / float(max(1, batch_episodes))
+            battles_won = _to_scalar(s.get("battles_won", 0.0))
+            battles_game = _to_scalar(s.get("battles_game", 0.0))
+            if battles_game > 0:
+                incre_win_rate = battles_won / battles_game
+            else:
+                incre_win_rate = won_flag_rate
             num_steps = float(max(1, batch_steps))
             value_loss = _to_scalar(s.get("value_loss", 0.0)) / num_steps
             policy_loss = _to_scalar(s.get("action_loss", 0.0)) / num_steps
             dist_entropy = _to_scalar(s.get("entropy", 0.0)) / num_steps
+            action_fix_count = _to_scalar(s.get("action_fix_count", 0.0))
+            action_fix_rate = action_fix_count / float(max(1.0, batch_steps * max(1, args.nfriendly)))
             _append_log({
                 "time": time.time(),
                 "phase": "train",
                 "update": total_updates,
                 "total_env_steps": total_env_steps,
                 "episode_reward": episode_reward,
+                "score_reward": score_reward,
                 "value_loss": value_loss,
                 "policy_loss": policy_loss,
                 "dist_entropy": dist_entropy,
                 "entropy": dist_entropy,
                 "incre_win_rate": incre_win_rate,
+                "won_flag_rate": won_flag_rate,
+                "action_fix_count": action_fix_count,
+                "action_fix_rate": action_fix_rate,
                 "step": total_updates,
             })
             if eval_trainer is not None and args.eval_interval > 0 and total_updates % args.eval_interval == 0:
@@ -530,6 +578,8 @@ def run(num_epochs):
         print('Episode: {}'.format(num_episodes))
         print('Reward: {}'.format(stat['reward']))
         print('Time: {:.2f}s'.format(epoch_time))
+        if args.env_name == 'grf' and 'score_reward' in stat.keys() and stat['num_episodes'] > 0:
+            print('Score-Reward: {:.4f}'.format(_to_scalar(stat['score_reward']) / float(max(1, stat['num_episodes']))))
         
         if 'enemy_reward' in stat.keys():
             print('Enemy-Reward: {}'.format(stat['enemy_reward']))

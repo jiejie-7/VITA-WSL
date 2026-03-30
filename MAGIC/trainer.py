@@ -1,14 +1,33 @@
 from collections import namedtuple
-from inspect import getargspec
+
+try:
+    from inspect import getfullargspec as getargspec
+except ImportError:  # Python < 3
+    from inspect import getargspec
+
+import itertools
 import numpy as np
 import torch
-from torch import optim
 import torch.nn as nn
+from torch import optim
+
 from utils import *
 from action_utils import *
-import itertools
 
-Transition = namedtuple('Transition', ('state', 'action', 'action_out', 'value', 'episode_mask', 'episode_mini_mask', 'next_state', 'reward', 'misc'))
+Transition = namedtuple(
+    'Transition',
+    (
+        'state',
+        'action',
+        'action_out',
+        'value',
+        'episode_mask',
+        'episode_mini_mask',
+        'next_state',
+        'reward',
+        'misc',
+    ),
+)
 
 
 class Trainer(object):
@@ -18,12 +37,10 @@ class Trainer(object):
         self.env = env
         self.display = False
         self.last_step = False
-        self.optimizer = optim.RMSprop(policy_net.parameters(),
-            lr = args.lrate, alpha=0.97, eps=1e-6)
+        self.optimizer = optim.RMSprop(policy_net.parameters(), lr=args.lrate, alpha=0.97, eps=1e-6)
         self.params = [p for p in self.policy_net.parameters()]
 
-
-    def get_episode(self, epoch):
+    def get_episode(self, epoch, deterministic=False):
         episode = []
         reset_args = getargspec(self.env.reset).args
         if 'epoch' in reset_args:
@@ -40,7 +57,9 @@ class Trainer(object):
             noise_info = self.env.get_noise_info()
             if isinstance(noise_info, dict):
                 info.update(noise_info)
-        switch_t = -1
+        initial_avail_actions = getattr(self.env, '_last_avail_actions', None)
+        if initial_avail_actions is not None:
+            info['avail_actions'] = initial_avail_actions
 
         prev_hid = torch.zeros(1, self.args.nagents, self.args.hid_size)
 
@@ -56,18 +75,29 @@ class Trainer(object):
             if (t + 1) % self.args.detach_gap == 0:
                 prev_hid = (prev_hid[0].detach(), prev_hid[1].detach())
 
-            action = select_action(self.args, action_out)
+            action = select_action(self.args, action_out, deterministic=deterministic)
             action, actual = translate_action(self.args, self.env, action)
             next_state, reward, done, info = self.env.step(actual)
+
+            if isinstance(info, dict) and 'action_fix_count' in info:
+                stat['action_fix_count'] = stat.get('action_fix_count', 0.0) + float(info.get('action_fix_count', 0.0))
 
             if 'alive_mask' in info:
                 misc['alive_mask'] = info['alive_mask'].reshape(reward.shape)
             else:
                 misc['alive_mask'] = np.ones_like(reward)
 
-            stat['reward'] = stat.get('reward', 0) + reward[:self.args.nfriendly]
+            stat['reward'] = stat.get('reward', 0) + reward[: self.args.nfriendly]
             if hasattr(self.args, 'enemy_comm') and self.args.enemy_comm:
-                stat['enemy_reward'] = stat.get('enemy_reward', 0) + reward[self.args.nfriendly:]
+                stat['enemy_reward'] = stat.get('enemy_reward', 0) + reward[self.args.nfriendly :]
+
+            if isinstance(info, dict) and not hasattr(self.env, 'get_stat'):
+                if 'won' in info:
+                    stat['won'] = 1.0 if bool(info.get('won', False)) else 0.0
+                if 'battles_won' in info:
+                    stat['battles_won'] = float(info.get('battles_won', 0.0))
+                if 'battles_game' in info:
+                    stat['battles_game'] = float(info.get('battles_game', 0.0))
 
             done = done or t == self.args.max_steps - 1
 
@@ -83,7 +113,17 @@ class Trainer(object):
             if should_display:
                 self.env.display()
 
-            trans = Transition(state, action, action_out, value, episode_mask, episode_mini_mask, next_state, reward, misc)
+            trans = Transition(
+                state,
+                action,
+                action_out,
+                value,
+                episode_mask,
+                episode_mini_mask,
+                next_state,
+                reward,
+                misc,
+            )
             episode.append(trans)
             state = next_state
             if done:
@@ -94,16 +134,14 @@ class Trainer(object):
         if hasattr(self.env, 'reward_terminal'):
             reward = self.env.reward_terminal()
 
-            episode[-1] = episode[-1]._replace(reward = episode[-1].reward + reward)
-            stat['reward'] = stat.get('reward', 0) + reward[:self.args.nfriendly]
+            episode[-1] = episode[-1]._replace(reward=episode[-1].reward + reward)
+            stat['reward'] = stat.get('reward', 0) + reward[: self.args.nfriendly]
             if hasattr(self.args, 'enemy_comm') and self.args.enemy_comm:
-                stat['enemy_reward'] = stat.get('enemy_reward', 0) + reward[self.args.nfriendly:]
-
+                stat['enemy_reward'] = stat.get('enemy_reward', 0) + reward[self.args.nfriendly :]
 
         if hasattr(self.env, 'get_stat'):
             merge_stat(self.env.get_stat(), stat)
         return (episode, stat)
-
 
     def compute_grad(self, batch):
         stat = dict()
@@ -116,12 +154,12 @@ class Trainer(object):
         batch_size = len(batch.state)
 
         # rewards: [batch_size * n]
-        rewards = torch.Tensor(batch.reward)
+        rewards = torch.from_numpy(np.asarray(batch.reward, dtype=np.float32)).double()
         # episode_mask: [batch_size * n]
-        episode_masks = torch.Tensor(batch.episode_mask)
+        episode_masks = torch.from_numpy(np.asarray(batch.episode_mask, dtype=np.float32)).double()
         # episode_mini_mask: [batch_size * n]
-        episode_mini_masks = torch.Tensor(batch.episode_mini_mask)
-        actions = torch.Tensor(batch.action)
+        episode_mini_masks = torch.from_numpy(np.asarray(batch.episode_mini_mask, dtype=np.float32)).double()
+        actions = torch.from_numpy(np.asarray(batch.action, dtype=np.float32)).double()
         # actions: [batch_size * n * dim_actions] have been detached
         actions = actions.transpose(1, 2).view(-1, n, dim_actions)
 
@@ -130,13 +168,15 @@ class Trainer(object):
         action_out = [torch.cat(a, dim=0) for a in action_out]
 
         # alive_masks: [batch_size * n]
-        alive_masks = torch.Tensor(np.concatenate([item['alive_mask'] for item in batch.misc])).view(-1)
+        alive_masks = torch.from_numpy(
+            np.concatenate([item['alive_mask'] for item in batch.misc]).astype(np.float32)
+        ).double().view(-1)
 
-        coop_returns = torch.Tensor(batch_size, n)
-        ncoop_returns = torch.Tensor(batch_size, n)
-        returns = torch.Tensor(batch_size, n)
-        deltas = torch.Tensor(batch_size, n)
-        advantages = torch.Tensor(batch_size, n)
+        coop_returns = torch.zeros(batch_size, n, dtype=torch.double)
+        ncoop_returns = torch.zeros(batch_size, n, dtype=torch.double)
+        returns = torch.zeros(batch_size, n, dtype=torch.double)
+        deltas = torch.zeros(batch_size, n, dtype=torch.double)
+        advantages = torch.zeros(batch_size, n, dtype=torch.double)
         values = values.view(batch_size, n)
 
         prev_coop_return = 0
@@ -151,16 +191,14 @@ class Trainer(object):
             prev_coop_return = coop_returns[i].clone()
             prev_ncoop_return = ncoop_returns[i].clone()
 
-            returns[i] = (self.args.mean_ratio * coop_returns[i].mean()) \
-                        + ((1 - self.args.mean_ratio) * ncoop_returns[i])
-
+            returns[i] = (self.args.mean_ratio * coop_returns[i].mean()) + ((1 - self.args.mean_ratio) * ncoop_returns[i])
 
         for i in reversed(range(rewards.size(0))):
             advantages[i] = returns[i] - values.data[i]
 
         if self.args.normalize_rewards:
             advantages = (advantages - advantages.mean()) / advantages.std()
-            
+
         # element of log_p_a: [(batch_size*n) * num_actions[i]]
         log_p_a = [action_out[i].view(-1, num_actions[i]) for i in range(dim_actions)]
         # actions: [(batch_size*n) * dim_actions]
@@ -225,9 +263,7 @@ class Trainer(object):
 
         s = self.compute_grad(batch)
         merge_stat(s, stat)
-#         for name, param in self.policy_net.named_parameters():
-#             print(name)
-#             print(param.grad)
+
         for p in self.params:
             if p._grad is not None:
                 p._grad.data /= stat['num_steps']

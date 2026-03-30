@@ -1,6 +1,7 @@
 import numbers
 import math
 from collections import namedtuple
+from pathlib import Path
 
 import numpy as np
 
@@ -123,8 +124,18 @@ def init_args_for_env(parser):
         return
 
     import gym
-    import ic3net_envs
-    import grf_envs
+    magic_root = Path(__file__).resolve().parent
+
+    if env_name in ("predator_prey", "traffic_junction"):
+        ic3net_root = magic_root / "envs" / "ic3net-envs"
+        if ic3net_root.exists() and str(ic3net_root) not in sys.path:
+            sys.path.insert(0, str(ic3net_root))
+        import ic3net_envs  # noqa: F401
+    elif env_name == "grf":
+        grf_root = magic_root / "envs" / "grf-envs"
+        if grf_root.exists() and str(grf_root) not in sys.path:
+            sys.path.insert(0, str(grf_root))
+        import grf_envs  # noqa: F401
 
     env = gym.make(env_dict[env_name])
     env.init_args(parser)

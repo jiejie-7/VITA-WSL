@@ -4,20 +4,26 @@ import torch
 import torch.multiprocessing as mp
 
 class MultiProcessWorker(mp.Process):
-    # TODO: Make environment init threadsafe
     def __init__(self, id, trainer_maker, comm, seed, *args, **kwargs):
         self.id = id
         self.seed = seed
+        self.trainer_maker = trainer_maker
+        self.trainer = None
         super(MultiProcessWorker, self).__init__()
-        try:
-            self.trainer = trainer_maker(self.id + 1)
-        except TypeError:
-            self.trainer = trainer_maker()
         self.comm = comm
+
+    def _build_trainer(self):
+        if self.trainer is not None:
+            return
+        try:
+            self.trainer = self.trainer_maker(self.id + 1)
+        except TypeError:
+            self.trainer = self.trainer_maker()
 
     def run(self):
         torch.manual_seed(self.seed + self.id + 1)
         np.random.seed(self.seed + self.id + 1)
+        self._build_trainer()
 
         while True:
             task = self.comm.recv()
@@ -44,10 +50,6 @@ class MultiProcessWorker(mp.Process):
 class MultiProcessTrainer(object):
     def __init__(self, args, trainer_maker):
         self.comms = []
-        try:
-            self.trainer = trainer_maker(0)
-        except TypeError:
-            self.trainer = trainer_maker()
         # itself will do the same job as workers
         self.nworkers = args.nprocesses - 1
         for i in range(self.nworkers):
@@ -55,27 +57,15 @@ class MultiProcessTrainer(object):
             self.comms.append(comm)
             worker = MultiProcessWorker(i, trainer_maker, comm_remote, seed=args.seed)
             worker.start()
-        self.grads = None
-        self.worker_grads = None
+        try:
+            self.trainer = trainer_maker(0)
+        except TypeError:
+            self.trainer = trainer_maker()
         self.is_random = args.random
 
     def quit(self):
         for comm in self.comms:
             comm.send('quit')
-
-    def obtain_grad_pointers(self):
-        # only need perform this once
-        if self.grads is None:
-            self.grads = []
-            for p in self.trainer.params:
-                if p._grad is not None:
-                    self.grads.append(p._grad.data)
-
-        if self.worker_grads is None:
-            self.worker_grads = []
-            for comm in self.comms:
-                comm.send('send_grads')
-                self.worker_grads.append(comm.recv())
 
     def train_batch(self, epoch):
         # run workers in parallel
@@ -93,12 +83,22 @@ class MultiProcessTrainer(object):
             s = comm.recv()
             merge_stat(s, stat)
 
-        # add gradients of workers
-        self.obtain_grad_pointers()
-        for i in range(len(self.grads)):
-            for g in self.worker_grads:
-                self.grads[i] += g[i]
-            self.grads[i] /= stat['num_steps']
+        # Pull the current worker gradients every update instead of reusing
+        # cached tensor references that may become stale on newer PyTorch.
+        worker_grads = []
+        for comm in self.comms:
+            comm.send('send_grads')
+            worker_grads.append(comm.recv())
+
+        local_grads = []
+        for p in self.trainer.params:
+            if p._grad is not None:
+                local_grads.append(p._grad.data)
+
+        for i in range(len(local_grads)):
+            for g in worker_grads:
+                local_grads[i] += g[i]
+            local_grads[i] /= stat['num_steps']
 
         self.trainer.optimizer.step()
         return stat

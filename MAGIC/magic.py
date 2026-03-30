@@ -200,7 +200,13 @@ class MAGIC(nn.Module):
         h = hidden_state.view(batch_size, n, self.hid_size)
         c = comm.view(batch_size, n, self.hid_size)
 
-        action_out = [F.log_softmax(action_head(torch.cat((h, c), dim=-1)), dim=-1) for action_head in self.action_heads]
+        joint = torch.cat((h, c), dim=-1)
+        avail_actions = info.get('avail_actions') if isinstance(info, dict) else None
+        action_out = []
+        for action_head in self.action_heads:
+            logits = action_head(joint)
+            logits = self._apply_avail_action_mask(logits, avail_actions)
+            action_out.append(F.log_softmax(logits, dim=-1))
 
         return action_out, value_head, (hidden_state.clone(), cell_state.clone())
 
@@ -225,7 +231,9 @@ class MAGIC(nn.Module):
 
     def _comm_malicious_mask(self, info, n, device, dtype, agent_mask=None):
         mask = None
-        if isinstance(info, dict) and 'malicious_mask' in info:
+        if isinstance(info, dict) and 'comm_malicious_mask' in info:
+            mask = info.get('comm_malicious_mask')
+        elif isinstance(info, dict) and 'malicious_mask' in info:
             mask = info.get('malicious_mask')
         if mask is None:
             prob = float(self.comm_malicious_agent_prob)
@@ -281,6 +289,32 @@ class MAGIC(nn.Module):
             drop = drop & (alive[:, None] & alive[None, :])
         keep = torch.from_numpy((~drop).astype(np.float64)).to(device=adj.device, dtype=adj.dtype)
         return adj * keep
+
+    def _apply_avail_action_mask(self, logits, avail_actions):
+        if avail_actions is None:
+            return logits
+
+        mask = torch.as_tensor(avail_actions, dtype=logits.dtype, device=logits.device)
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        if mask.dim() != 3:
+            return logits
+
+        if mask.size(0) == 1 and logits.size(0) > 1:
+            mask = mask.expand(logits.size(0), -1, -1)
+
+        if mask.size(0) != logits.size(0) or mask.size(1) != logits.size(1) or mask.size(2) != logits.size(2):
+            return logits
+
+        valid = mask > 0.5
+        all_invalid = ~valid.any(dim=-1, keepdim=True)
+        if all_invalid.any():
+            fallback = torch.zeros_like(valid)
+            fallback_idx = torch.argmax(logits, dim=-1, keepdim=True)
+            fallback.scatter_(-1, fallback_idx, True)
+            valid = torch.where(all_invalid, fallback, valid)
+
+        return logits.masked_fill(~valid, -1e10)
 
     def get_agent_mask(self, batch_size, info):
         """

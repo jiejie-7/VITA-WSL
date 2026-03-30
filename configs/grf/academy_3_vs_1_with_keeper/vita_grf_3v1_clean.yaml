@@ -1,0 +1,57 @@
+algorithm: vita
+experiment_name: vita_grf_3v1_clean
+seed: 1
+cuda: true
+env:
+  name: grf
+  scenario_name: academy_3_vs_1_with_keeper
+  num_agents: 3
+  num_envs: 8
+  representation: simple115v2
+  rewards: scoring,checkpoints
+  share_reward: true
+  eval_deterministic: true
+model:
+  hidden_dim: 128
+  latent_dim: 32
+  trust_gamma: 3.5
+  kl_beta: 0.1
+  kl_free_bits: 0.005
+  attn_bias_coef: 0.5
+  trust_lambda: 0.2
+  trust_malicious_weight: 0.2
+  trust_gate_floor: 0.1
+  comm_dropout: 0.05
+  enable_trust: true
+  enable_kl: true
+  comm_sight_range: 10.0
+  max_neighbors: 2
+  history_length: 1
+train:
+  episode_length: 200
+  updates: 4000
+  num_env_steps: 6400000
+  lr: 0.0005
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_param: 0.2
+  ppo_epochs: 15
+  num_mini_batch: 2
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 10.0
+  trust_delay_updates: 0
+  trust_warmup_updates: 200
+  kl_delay_updates: 0
+  kl_warmup_updates: 200
+  comm_delay_updates: 0
+  comm_warmup_updates: 100
+  comm_full_warmup_updates: 200
+  log_interval_steps: 32000
+  save_interval_steps: 640000
+  eval_interval_steps: 320000
+  eval_episodes: 32
+onpolicy:
+  use_wandb: false
+  share_policy: true
+  use_centralized_V: true
