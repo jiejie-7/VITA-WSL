@@ -52,3 +52,11 @@ summary.json
 # StarCraft / temp
 sc2.log
 StarCraftII/
+
+# Markdown notes
+*.md
+!/README.md
+!/MAGIC/README.md
+
+# Papers / PDFs
+*.pdf
