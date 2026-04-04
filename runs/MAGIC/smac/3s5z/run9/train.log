@@ -1,1 +1,0 @@
-{"time": 1773331465.9866922, "phase": "train", "update": 1, "total_env_steps": 979, "episode_reward": 4.466979132758246, "value_loss": 37.09942571805292, "policy_loss": 24.030416917784816, "dist_entropy": 9.876161708508956, "entropy": 9.876161708508956, "incre_win_rate": 0.0, "won_flag_rate": 0.0, "action_fix_count": 0.0, "action_fix_rate": 0.0, "step": 1}
