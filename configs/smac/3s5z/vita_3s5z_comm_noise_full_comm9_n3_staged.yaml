@@ -17,14 +17,14 @@ env:
   comm_packet_drop_prob: 0.05
   comm_malicious_agent_prob: 0.5
   comm_malicious_noise_scale: 0.15
-  comm_malicious_mode: fixed
+  comm_malicious_mode: bernoulli
   comm_malicious_fixed_agent_id: 0
 
 model:
   hidden_dim: 128
   latent_dim: 32
   trust_gamma: 3.5
-  kl_beta: 0.2
+  kl_beta: 0.02
   kl_free_bits: 0.005
   attn_bias_coef: 0.5
   trust_lambda: 0.2
@@ -40,7 +40,7 @@ model:
 
 train:
   episode_length: 400
-  updates: 4688
+  updates: 3125
   lr: 0.0005
   gamma: 0.99
   gae_lambda: 0.95
@@ -51,8 +51,8 @@ train:
   value_loss_coef: 0.5
   use_value_active_masks: false
   max_grad_norm: 10.0
-  trust_delay_updates: 300
-  trust_warmup_updates: 300
+  trust_delay_updates: 180
+  trust_warmup_updates: 180
   kl_delay_updates: 500
   kl_warmup_updates: 600
   comm_delay_updates: 120

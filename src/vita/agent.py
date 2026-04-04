@@ -171,6 +171,8 @@ class VITAAgent(torch.nn.Module):
         state: torch.Tensor,
         neighbor_seq: torch.Tensor,
         neighbor_mask: torch.Tensor | None,
+        channel_mask: torch.Tensor | None,
+        channel_noise: torch.Tensor | None,
         neighbor_next_actions: torch.Tensor | None,
         rnn_states_actor: torch.Tensor,
         rnn_states_critic: torch.Tensor,
@@ -188,33 +190,44 @@ class VITAAgent(torch.nn.Module):
             neighbor_feat = self._encode_neighbors(neighbor_seq)
             if neighbor_mask is None:
                 neighbor_mask = torch.ones(neighbor_feat.size(0), neighbor_feat.size(1), 1, device=neighbor_feat.device)
-            comm_mask = neighbor_mask.float()
-            comm_mask = torch.nan_to_num(comm_mask, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-            neighbor_feat = torch.nan_to_num(neighbor_feat, nan=0.0, posinf=0.0, neginf=0.0)
+            sender_mask = torch.nan_to_num(neighbor_mask.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            if channel_mask is None:
+                recv_mask = sender_mask
+            else:
+                recv_mask = torch.nan_to_num(channel_mask.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+                recv_mask = recv_mask * sender_mask
+            vib_deterministic = bool(deterministic) or bool(self.cfg.vib_deterministic)
+            sender_messages, kl_loss, kl_raw = self.vib_gat.encode_messages(
+                neighbor_feat,
+                sender_mask,
+                deterministic=vib_deterministic,
+            )
+            if channel_noise is None:
+                recv_messages = sender_messages
+            else:
+                recv_messages = sender_messages + torch.nan_to_num(channel_noise, nan=0.0, posinf=0.0, neginf=0.0)
+            recv_messages = recv_messages * recv_mask
+            recv_feat = self.vib_gat.decode_messages(recv_messages)
             use_trust = self.cfg.enable_trust
             if use_trust:
-                _, trust_scores = self._predict_trust(neighbor_feat, neighbor_next_actions)
+                _, trust_scores = self._predict_trust(recv_feat, neighbor_next_actions)
                 trust_scores = trust_scores.detach()
                 trust_scores = (1.0 - float(self.trust_strength)) + float(self.trust_strength) * trust_scores
             else:
-                trust_scores = torch.ones_like(comm_mask)
+                trust_scores = torch.ones_like(recv_mask)
             trust_gate_soft = trust_scores.clamp(min=0.0, max=1.0)
             gate_floor = float(max(0.0, min(1.0, float(self.cfg.trust_gate_floor))))
             if gate_floor > 0.0:
                 trust_gate_soft = gate_floor + (1.0 - gate_floor) * trust_gate_soft
-            comm_mask = comm_mask * trust_gate_soft
-            neighbor_feat = neighbor_feat * comm_mask
-            trust_scores = trust_scores * neighbor_mask + (1e-6 * (1.0 - neighbor_mask))
-            vib_deterministic = bool(deterministic) or bool(self.cfg.vib_deterministic)
-            comm_feat, kl_loss, kl_raw = self.vib_gat(
+            aggregate_mask = recv_mask * trust_gate_soft
+            trust_scores = trust_scores * recv_mask + (1e-6 * (1.0 - recv_mask))
+            comm_feat = self.vib_gat.aggregate_messages(
                 self_feat,
-                neighbor_feat,
+                recv_messages,
                 trust_scores,
-                comm_mask,
-                alive_mask=comm_mask,
-                deterministic=vib_deterministic,
+                aggregate_mask,
+                recv_features=recv_feat,
             )
-            comm_feat = torch.nan_to_num(comm_feat, nan=0.0, posinf=0.0, neginf=0.0)
             kl_loss = torch.nan_to_num(kl_loss, nan=0.0, posinf=0.0, neginf=0.0)
             kl_raw = torch.nan_to_num(kl_raw, nan=0.0, posinf=0.0, neginf=0.0)
             if not self.cfg.enable_kl:
@@ -252,6 +265,8 @@ class VITAAgent(torch.nn.Module):
         state: torch.Tensor,
         neighbor_seq: torch.Tensor,
         neighbor_mask: torch.Tensor | None,
+        channel_mask: torch.Tensor | None,
+        channel_noise: torch.Tensor | None,
         neighbor_next_actions: torch.Tensor,
         neighbor_malicious: torch.Tensor | None,
         actions: torch.Tensor,
@@ -280,55 +295,65 @@ class VITAAgent(torch.nn.Module):
             neighbor_feat = self._encode_neighbors(neighbor_seq)
             if neighbor_mask is None:
                 neighbor_mask = torch.ones(neighbor_feat.size(0), neighbor_feat.size(1), 1, device=neighbor_feat.device)
-            comm_mask = neighbor_mask.float()
-            comm_mask = torch.nan_to_num(comm_mask, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-            neighbor_feat = torch.nan_to_num(neighbor_feat, nan=0.0, posinf=0.0, neginf=0.0)
+            sender_mask = torch.nan_to_num(neighbor_mask.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            if channel_mask is None:
+                recv_mask = sender_mask
+            else:
+                recv_mask = torch.nan_to_num(channel_mask.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+                recv_mask = recv_mask * sender_mask
+            sender_messages, kl_loss, kl_raw = self.vib_gat.encode_messages(
+                neighbor_feat,
+                sender_mask,
+                deterministic=bool(self.cfg.vib_deterministic),
+            )
+            if channel_noise is None:
+                recv_messages = sender_messages
+            else:
+                recv_messages = sender_messages + torch.nan_to_num(channel_noise, nan=0.0, posinf=0.0, neginf=0.0)
+            recv_messages = recv_messages * recv_mask
+            recv_feat = self.vib_gat.decode_messages(recv_messages)
+
             trust_loss = torch.zeros(1, device=obs_seq.device)
             trust_scores_raw = None
             use_trust = self.cfg.enable_trust
             if use_trust:
-                trust_logits, trust_scores_raw = self._predict_trust(neighbor_feat, neighbor_next_actions)
+                trust_logits, trust_scores_raw = self._predict_trust(recv_feat, neighbor_next_actions)
                 trust_loss = self._trust_loss(
                     trust_logits,
                     trust_scores_raw,
                     neighbor_next_actions,
-                    neighbor_mask=neighbor_mask,
+                    neighbor_mask=recv_mask,
                     neighbor_malicious=neighbor_malicious,
                 )
                 trust_scores_raw = trust_scores_raw.detach()
                 trust_scores = (1.0 - float(self.trust_strength)) + float(self.trust_strength) * trust_scores_raw
             else:
-                trust_scores = torch.ones_like(comm_mask)
+                trust_scores = torch.ones_like(recv_mask)
                 trust_scores_raw = None
             trust_gate_soft = trust_scores.clamp(min=0.0, max=1.0)
             gate_floor = float(max(0.0, min(1.0, float(self.cfg.trust_gate_floor))))
             if gate_floor > 0.0:
                 trust_gate_soft = gate_floor + (1.0 - gate_floor) * trust_gate_soft
-            comm_mask = comm_mask * trust_gate_soft
-            neighbor_feat = neighbor_feat * comm_mask
-            trust_scores = trust_scores * neighbor_mask + (1e-6 * (1.0 - neighbor_mask))
-            vib_deterministic = bool(self.cfg.vib_deterministic)
-            comm_feat, kl_loss, kl_raw = self.vib_gat(
+            aggregate_mask = recv_mask * trust_gate_soft
+            trust_scores = trust_scores * recv_mask + (1e-6 * (1.0 - recv_mask))
+            comm_feat = self.vib_gat.aggregate_messages(
                 self_feat,
-                neighbor_feat,
+                recv_messages,
                 trust_scores,
-                comm_mask,
-                alive_mask=comm_mask,
-                deterministic=vib_deterministic,
+                aggregate_mask,
+                recv_features=recv_feat,
             )
-            comm_feat = torch.nan_to_num(comm_feat, nan=0.0, posinf=0.0, neginf=0.0)
             kl_loss = torch.nan_to_num(kl_loss, nan=0.0, posinf=0.0, neginf=0.0)
             kl_raw = torch.nan_to_num(kl_raw, nan=0.0, posinf=0.0, neginf=0.0)
-            # Align KL penalty strength with how much communication is used in the residual fusion.
             kl_loss = kl_loss * float(self.comm_strength)
             if not self.cfg.enable_kl:
                 kl_loss = torch.zeros(1, device=self_feat.device)
             comm_feat = self.comm_dropout(comm_feat)
 
-            # Trust diagnostics (computed on valid neighbor slots before comm dropout).
-            valid_mask = (neighbor_mask > 0.5).squeeze(-1)
-            comm_valid_neighbors = valid_mask.float().sum(dim=-1).mean()
-            comm_kept_neighbors = comm_mask.squeeze(-1).sum(dim=-1).mean()
+            valid_mask = (recv_mask > 0.5).squeeze(-1)
+            sender_valid_mask = (sender_mask > 0.5).squeeze(-1)
+            comm_valid_neighbors = sender_valid_mask.float().sum(dim=-1).mean()
+            comm_kept_neighbors = aggregate_mask.squeeze(-1).sum(dim=-1).mean()
             trust_values = (trust_scores_raw if trust_scores_raw is not None else trust_scores).squeeze(-1)[valid_mask]
             if trust_values.numel() == 0:
                 trust_score_mean = torch.zeros(1, device=obs_seq.device)
@@ -343,14 +368,16 @@ class VITAAgent(torch.nn.Module):
                 trust_score_p10 = qv[0]
                 trust_score_p50 = qv[1]
                 trust_score_p90 = qv[2]
-                kept = comm_mask.squeeze(-1)[valid_mask].sum()
+                kept = aggregate_mask.squeeze(-1)[valid_mask].sum()
                 trust_gate_ratio = kept / valid_mask.float().sum().clamp_min(1.0)
             comm_malicious_ratio = torch.zeros(1, device=obs_seq.device)
             trust_malicious_gap = torch.zeros(1, device=obs_seq.device)
-            if neighbor_malicious is not None and trust_scores_raw is not None:
+            mal_mask = None
+            if neighbor_malicious is not None:
                 mal_mask = (neighbor_malicious > 0.5).squeeze(-1) & valid_mask
                 if bool(valid_mask.any()):
                     comm_malicious_ratio = mal_mask.float().sum() / valid_mask.float().sum().clamp_min(1.0)
+            if mal_mask is not None and trust_scores_raw is not None:
                 if bool(mal_mask.any()):
                     trust_mal = trust_scores_raw.squeeze(-1)[mal_mask].mean()
                 else:

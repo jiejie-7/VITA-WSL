@@ -83,6 +83,9 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
 
     hidden_size = _as_int(model_cfg.get("hidden_dim", 64), name="model.hidden_dim")
     args += ["--hidden_size", str(hidden_size)]
+    if "gain" in train_cfg or "gain" in model_cfg:
+        gain = _as_float(train_cfg.get("gain", model_cfg.get("gain", 0.01)), name="train.gain")
+        args += ["--gain", str(gain)]
 
     args += ["--n_training_threads", str(_as_int(train_cfg.get("n_training_threads", 1), name="train.n_training_threads"))]
     args += ["--n_rollout_threads", str(num_envs)]
@@ -134,6 +137,8 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
             _flag_store_true(args, "vita_disable_kl", True)
         if bool(model_cfg.get("attention_only", False)):
             _flag_store_true(args, "vita_attention_only", True)
+        if bool(model_cfg.get("vib_deterministic", False)):
+            _flag_store_true(args, "vita_vib_deterministic", True)
 
         args += ["--vita_trust_warmup_updates", str(_as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates"))]
         args += ["--vita_trust_delay_updates", str(_as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates"))]
@@ -150,6 +155,7 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
     _flag_store_false(args, "cuda", bool(cfg.get("cuda", True)))
 
     _flag_store_true(args, "use_proper_time_limits", bool(train_cfg.get("use_proper_time_limits", False)))
+    _flag_store_true(args, "use_linear_lr_decay", bool(train_cfg.get("use_linear_lr_decay", False)))
     _flag_store_false(args, "use_clipped_value_loss", bool(train_cfg.get("use_clipped_value_loss", True)))
     _flag_store_false(args, "use_huber_loss", bool(train_cfg.get("use_huber_loss", True)))
     _flag_store_false(args, "use_value_active_masks", bool(train_cfg.get("use_value_active_masks", True)))
@@ -157,6 +163,8 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
     _flag_store_false(args, "use_max_grad_norm", bool(train_cfg.get("use_max_grad_norm", True)))
     _flag_store_false(args, "use_gae", bool(train_cfg.get("use_gae", True)))
     _flag_store_false(args, "use_valuenorm", bool(train_cfg.get("use_valuenorm", True)))
+    _flag_store_false(args, "use_centralized_V", bool(onpolicy_cfg.get("use_centralized_V", True)))
+    _flag_store_false(args, "share_policy", bool(onpolicy_cfg.get("share_policy", True)))
 
     eval_interval = _as_int(train_cfg.get("eval_interval_updates", 0), name="train.eval_interval_updates")
     eval_episodes = _as_int(train_cfg.get("eval_episodes", 0), name="train.eval_episodes")
@@ -266,6 +274,10 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
             _flag_store_true(args, "vita_disable_trust", True)
         if not bool(model_cfg.get("enable_kl", True)):
             _flag_store_true(args, "vita_disable_kl", True)
+        if bool(model_cfg.get("attention_only", False)):
+            _flag_store_true(args, "vita_attention_only", True)
+        if bool(model_cfg.get("vib_deterministic", False)):
+            _flag_store_true(args, "vita_vib_deterministic", True)
 
         args += ["--vita_trust_warmup_updates", str(_as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates"))]
         args += ["--vita_trust_delay_updates", str(_as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates"))]
@@ -401,6 +413,20 @@ def run_onpolicy_football(cfg: Dict[str, Any], *, config_path: Path, run_dir: Pa
 
     os.environ["ONPOLICY_RUN_DIR"] = str(run_dir)
     os.environ.setdefault("ONPOLICY_JSON_LOG", "1")
+    env_cfg = cfg.get("env") or {}
+    os.environ["ONPOLICY_OBS_NOISE_STD"] = str(float(env_cfg.get("obs_noise_std", 0.0)))
+    os.environ["ONPOLICY_PACKET_DROP_PROB"] = str(float(env_cfg.get("packet_drop_prob", 0.0)))
+    os.environ["ONPOLICY_MALICIOUS_AGENT_PROB"] = str(float(env_cfg.get("malicious_agent_prob", 0.0)))
+    os.environ["ONPOLICY_MALICIOUS_OBS_NOISE_SCALE"] = str(float(env_cfg.get("malicious_obs_noise_scale", 3.0)))
+    os.environ["ONPOLICY_MALICIOUS_OBS_MODE"] = str(env_cfg.get("malicious_obs_mode", "replace"))
+    os.environ["ONPOLICY_NOISE_WARMUP_STEPS"] = str(int(env_cfg.get("noise_warmup_steps", 0)))
+    os.environ["ONPOLICY_COMM_NOISE_STD"] = str(float(env_cfg.get("comm_noise_std", 0.0)))
+    os.environ["ONPOLICY_COMM_PACKET_DROP_PROB"] = str(float(env_cfg.get("comm_packet_drop_prob", 0.0)))
+    os.environ["ONPOLICY_COMM_MALICIOUS_AGENT_PROB"] = str(float(env_cfg.get("comm_malicious_agent_prob", 0.0)))
+    os.environ["ONPOLICY_COMM_MALICIOUS_NOISE_SCALE"] = str(float(env_cfg.get("comm_malicious_noise_scale", 3.0)))
+    os.environ["ONPOLICY_COMM_MALICIOUS_MODE"] = str(env_cfg.get("comm_malicious_mode", "bernoulli"))
+    os.environ["ONPOLICY_COMM_MALICIOUS_FIXED_AGENT_ID"] = str(int(env_cfg.get("comm_malicious_fixed_agent_id", 0)))
+    os.environ["ONPOLICY_REWARD_MULT"] = str(float(env_cfg.get("reward_scale", 1.0)))
 
     args = build_onpolicy_football_args(cfg, config_path=config_path)
 
