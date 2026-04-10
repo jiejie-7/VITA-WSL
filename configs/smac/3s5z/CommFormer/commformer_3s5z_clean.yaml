@@ -1,0 +1,54 @@
+algorithm: commformer_dec
+seed: 1
+cuda: true
+env:
+  name: StarCraft2
+  map_name: 3s5z
+  eval_map_name: 3s5z
+  random_agent_order: false
+  sight_range: 9
+  shoot_range: 6
+  obs_noise_std: 0.0
+  packet_drop_prob: 0.0
+  malicious_agent_prob: 0.0
+  malicious_obs_noise_scale: 3.0
+  malicious_obs_mode: replace
+  noise_warmup_steps: 0
+  reward_mult: 1.0
+  comm_noise_std: 0.0
+  comm_packet_drop_prob: 0.0
+  comm_malicious_agent_prob: 0.0
+  comm_malicious_noise_scale: 3.0
+  comm_malicious_mode: bernoulli
+  comm_malicious_fixed_agent_id: 0
+  comm_sight_range: 0.0
+  max_neighbors: 0
+train:
+  n_training_threads: 16
+  n_rollout_threads: 32
+  n_eval_rollout_threads: 1
+  num_mini_batch: 1
+  episode_length: 100
+  num_env_steps: 3000000
+  lr: 0.0005
+  ppo_epoch: 10
+  clip_param: 0.05
+  save_interval: 100000
+  use_eval: true
+  eval_interval: 25
+  eval_episodes: 32
+model:
+  n_block: 1
+  n_embd: 64
+  n_head: 1
+  dec_actor: true
+  share_actor: false
+  use_bilevel: true
+  warmup: 10
+  post_stable: true
+  post_ratio: 0.5
+  self_loop_add: true
+  no_relation_enhanced: false
+notes:
+  source: original CommFormer 3s5z recipe from train_smac.sh
+  clean_behavior_preserved: true

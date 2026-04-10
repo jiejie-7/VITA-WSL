@@ -140,8 +140,14 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
         if bool(model_cfg.get("vib_deterministic", False)):
             _flag_store_true(args, "vita_vib_deterministic", True)
 
-        args += ["--vita_trust_warmup_updates", str(_as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates"))]
-        args += ["--vita_trust_delay_updates", str(_as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates"))]
+        trust_warmup = _as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates")
+        trust_delay = _as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates")
+        args += ["--vita_trust_warmup_updates", str(trust_warmup)]
+        args += ["--vita_trust_delay_updates", str(trust_delay)]
+        args += ["--vita_trust_loss_warmup_updates", str(_as_int(train_cfg.get("trust_loss_warmup_updates", trust_warmup), name="train.trust_loss_warmup_updates"))]
+        args += ["--vita_trust_loss_delay_updates", str(_as_int(train_cfg.get("trust_loss_delay_updates", trust_delay), name="train.trust_loss_delay_updates"))]
+        args += ["--vita_trust_gate_warmup_updates", str(_as_int(train_cfg.get("trust_gate_warmup_updates", trust_warmup), name="train.trust_gate_warmup_updates"))]
+        args += ["--vita_trust_gate_delay_updates", str(_as_int(train_cfg.get("trust_gate_delay_updates", trust_delay), name="train.trust_gate_delay_updates"))]
         args += ["--vita_kl_warmup_updates", str(_as_int(train_cfg.get("kl_warmup_updates", 0), name="train.kl_warmup_updates"))]
         args += ["--vita_kl_delay_updates", str(_as_int(train_cfg.get("kl_delay_updates", 0), name="train.kl_delay_updates"))]
         args += ["--vita_comm_delay_updates", str(_as_int(train_cfg.get("comm_delay_updates", 0), name="train.comm_delay_updates"))]
@@ -279,8 +285,14 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
         if bool(model_cfg.get("vib_deterministic", False)):
             _flag_store_true(args, "vita_vib_deterministic", True)
 
-        args += ["--vita_trust_warmup_updates", str(_as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates"))]
-        args += ["--vita_trust_delay_updates", str(_as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates"))]
+        trust_warmup = _as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates")
+        trust_delay = _as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates")
+        args += ["--vita_trust_warmup_updates", str(trust_warmup)]
+        args += ["--vita_trust_delay_updates", str(trust_delay)]
+        args += ["--vita_trust_loss_warmup_updates", str(_as_int(train_cfg.get("trust_loss_warmup_updates", trust_warmup), name="train.trust_loss_warmup_updates"))]
+        args += ["--vita_trust_loss_delay_updates", str(_as_int(train_cfg.get("trust_loss_delay_updates", trust_delay), name="train.trust_loss_delay_updates"))]
+        args += ["--vita_trust_gate_warmup_updates", str(_as_int(train_cfg.get("trust_gate_warmup_updates", trust_warmup), name="train.trust_gate_warmup_updates"))]
+        args += ["--vita_trust_gate_delay_updates", str(_as_int(train_cfg.get("trust_gate_delay_updates", trust_delay), name="train.trust_gate_delay_updates"))]
         args += ["--vita_kl_warmup_updates", str(_as_int(train_cfg.get("kl_warmup_updates", 0), name="train.kl_warmup_updates"))]
         args += ["--vita_kl_delay_updates", str(_as_int(train_cfg.get("kl_delay_updates", 0), name="train.kl_delay_updates"))]
         args += ["--vita_comm_delay_updates", str(_as_int(train_cfg.get("comm_delay_updates", 0), name="train.comm_delay_updates"))]

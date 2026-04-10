@@ -49,6 +49,9 @@ summary.json
 *.tar.gz
 *.7z
 
+# Nested external repos
+/CommFormer/
+
 # StarCraft / temp
 sc2.log
 StarCraftII/
