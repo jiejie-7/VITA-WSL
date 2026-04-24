@@ -1,0 +1,41 @@
+algorithm: mappo
+seed: 1
+cuda: true
+env:
+  name: smac
+  map_name: MMM2
+  difficulty: "7"
+  num_envs: 8
+  reward_scale: 1.0
+  obs_noise_std: 0.0
+  packet_drop_prob: 0.0
+  malicious_agent_prob: 0.0
+  malicious_obs_noise_scale: 0.0
+  malicious_obs_mode: add
+  noise_warmup_steps: 0
+  comm_noise_std: 0.0
+  comm_packet_drop_prob: 0.0
+  comm_malicious_agent_prob: 0.0
+  comm_malicious_noise_scale: 0.0
+  comm_malicious_mode: bernoulli
+  comm_malicious_fixed_agent_id: 0
+
+model:
+  hidden_dim: 64
+
+train:
+  episode_length: 400
+  updates: 3125
+  lr: 0.0005
+  gain: 1
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_param: 0.2
+  ppo_epochs: 5
+  num_mini_batch: 2
+  entropy_coef: 0.01
+  value_loss_coef: 1.0
+  use_value_active_masks: false
+  max_grad_norm: 10.0
+  eval_interval_updates: 25
+  eval_episodes: 32
