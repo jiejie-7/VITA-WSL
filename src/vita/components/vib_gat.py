@@ -63,7 +63,7 @@ class VIBGATLayer(nn.Module):
         valid_mask: torch.Tensor | None = None,
         *,
         deterministic: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         neighbor_feat = torch.nan_to_num(neighbor_feat, nan=0.0, posinf=0.0, neginf=0.0)
         norm_neighbors = self.pre_norm(neighbor_feat)
         norm_neighbors = torch.nan_to_num(norm_neighbors, nan=0.0, posinf=0.0, neginf=0.0)
@@ -72,7 +72,8 @@ class VIBGATLayer(nn.Module):
             messages = self.direct_latent(norm_neighbors)
             kl_raw = torch.zeros(1, device=neighbor_feat.device, dtype=neighbor_feat.dtype)
             kl_scaled = torch.zeros(1, device=neighbor_feat.device, dtype=neighbor_feat.dtype)
-            return self.post_norm(messages), kl_scaled, kl_raw
+            uncertainty = torch.zeros((*messages.shape[:2], 1), device=neighbor_feat.device, dtype=neighbor_feat.dtype)
+            return self.post_norm(messages), kl_scaled, kl_raw, uncertainty
 
         mu = self.to_mu(norm_neighbors)
         logvar = self.to_logvar(norm_neighbors)
@@ -98,7 +99,9 @@ class VIBGATLayer(nn.Module):
         else:
             kl_for_loss = kl_raw
         kl_scaled = self.kl_beta * kl_for_loss
-        return messages, kl_scaled, kl_raw
+        uncertainty = torch.mean(torch.exp(logvar), dim=-1, keepdim=True)
+        uncertainty = torch.nan_to_num(uncertainty, nan=1.0, posinf=1.0, neginf=1.0)
+        return messages, kl_scaled, kl_raw, uncertainty
 
     def decode_messages(self, messages: torch.Tensor) -> torch.Tensor:
         messages = torch.nan_to_num(messages, nan=0.0, posinf=0.0, neginf=0.0)

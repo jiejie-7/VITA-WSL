@@ -15,8 +15,8 @@ env:
   noise_warmup_steps: 0
   comm_noise_std: 0.0
   comm_packet_drop_prob: 0.05
-  comm_malicious_agent_prob: 0.5
-  comm_malicious_noise_scale: 0.15
+  comm_malicious_agent_prob: 0.1
+  comm_malicious_noise_scale: 0.05
   comm_malicious_mode: bernoulli
   comm_malicious_fixed_agent_id: 0
 
@@ -24,16 +24,21 @@ model:
   hidden_dim: 128
   latent_dim: 32
   trust_gamma: 3.5
-  kl_beta: 0.02
+  kl_beta: 0.01
   kl_free_bits: 0.005
   attn_bias_coef: 0.5
   trust_lambda: 0.2
   trust_malicious_weight: 0.2
-  trust_gate_floor: 0.2
+  trust_gate_floor: 0.0
+  trust_malicious_gate_coef: 1.0
+  allocation_sharpness: 1.0
+  allocation_floor: 0.0
   comm_dropout: 0.05
   enable_trust: true
   enable_kl: true
   vib_deterministic: false
+  trust_hard_topk: true
+  trust_topk_k: 3
   comm_sight_range: 9
   max_neighbors: 5
   history_length: 1
@@ -56,11 +61,11 @@ train:
   trust_warmup_updates: 180
   trust_loss_delay_updates: 120
   trust_loss_warmup_updates: 120
-  trust_gate_delay_updates: 360
-  trust_gate_warmup_updates: 180
-  kl_delay_updates: 900
-  kl_warmup_updates: 600
-  comm_delay_updates: 120
+  trust_gate_delay_updates: 480
+  trust_gate_warmup_updates: 240
+  kl_delay_updates: 1200
+  kl_warmup_updates: 1200
+  comm_delay_updates: 0
   comm_warmup_updates: 120
   comm_full_warmup_updates: 240
   eval_interval_updates: 25

@@ -127,7 +127,16 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
         args += ["--vita_attn_bias_coef", str(_as_float(model_cfg.get("attn_bias_coef", 1.0), name="model.attn_bias_coef"))]
         args += ["--vita_trust_lambda", str(_as_float(model_cfg.get("trust_lambda", 0.1), name="model.trust_lambda"))]
         args += ["--vita_trust_malicious_weight", str(_as_float(model_cfg.get("trust_malicious_weight", 1.0), name="model.trust_malicious_weight"))]
+        args += ["--vita_trust_margin_weight", str(_as_float(model_cfg.get("trust_margin_weight", 0.5), name="model.trust_margin_weight"))]
+        args += ["--vita_trust_margin", str(_as_float(model_cfg.get("trust_margin", 0.1), name="model.trust_margin"))]
+        args += ["--vita_trust_reliability_mix", str(_as_float(model_cfg.get("trust_reliability_mix", 0.5), name="model.trust_reliability_mix"))]
+        args += ["--vita_trust_counterfactual_mix", str(_as_float(model_cfg.get("trust_counterfactual_mix", 0.5), name="model.trust_counterfactual_mix"))]
+        args += ["--vita_trust_counterfactual_margin", str(_as_float(model_cfg.get("trust_counterfactual_margin", 0.02), name="model.trust_counterfactual_margin"))]
+        args += ["--vita_trust_counterfactual_weight", str(_as_float(model_cfg.get("trust_counterfactual_weight", 1.0), name="model.trust_counterfactual_weight"))]
         args += ["--vita_trust_gate_floor", str(_as_float(model_cfg.get("trust_gate_floor", 0.0), name="model.trust_gate_floor"))]
+        args += ["--vita_trust_malicious_gate_coef", str(_as_float(model_cfg.get("trust_malicious_gate_coef", 1.0), name="model.trust_malicious_gate_coef"))]
+        args += ["--vita_allocation_sharpness", str(_as_float(model_cfg.get("allocation_sharpness", 1.0), name="model.allocation_sharpness"))]
+        args += ["--vita_allocation_floor", str(_as_float(model_cfg.get("allocation_floor", 0.0), name="model.allocation_floor"))]
         args += ["--vita_comm_dropout", str(_as_float(model_cfg.get("comm_dropout", 0.1), name="model.comm_dropout"))]
         args += ["--vita_comm_sight_range", str(_as_float(model_cfg.get("comm_sight_range", 0.0), name="model.comm_sight_range"))]
         args += ["--vita_max_neighbors", str(_as_int(model_cfg.get("max_neighbors", 4), name="model.max_neighbors"))]
@@ -139,6 +148,9 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
             _flag_store_true(args, "vita_attention_only", True)
         if bool(model_cfg.get("vib_deterministic", False)):
             _flag_store_true(args, "vita_vib_deterministic", True)
+        if bool(model_cfg.get("trust_hard_topk", False)):
+            _flag_store_true(args, "vita_trust_hard_topk", True)
+        args += ["--vita_trust_topk_k", str(_as_int(model_cfg.get("trust_topk_k", 0), name="model.trust_topk_k"))]
 
         trust_warmup = _as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates")
         trust_delay = _as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates")
@@ -272,7 +284,16 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
         args += ["--vita_attn_bias_coef", str(_as_float(model_cfg.get("attn_bias_coef", 1.0), name="model.attn_bias_coef"))]
         args += ["--vita_trust_lambda", str(_as_float(model_cfg.get("trust_lambda", 0.1), name="model.trust_lambda"))]
         args += ["--vita_trust_malicious_weight", str(_as_float(model_cfg.get("trust_malicious_weight", 1.0), name="model.trust_malicious_weight"))]
+        args += ["--vita_trust_margin_weight", str(_as_float(model_cfg.get("trust_margin_weight", 0.5), name="model.trust_margin_weight"))]
+        args += ["--vita_trust_margin", str(_as_float(model_cfg.get("trust_margin", 0.1), name="model.trust_margin"))]
+        args += ["--vita_trust_reliability_mix", str(_as_float(model_cfg.get("trust_reliability_mix", 0.5), name="model.trust_reliability_mix"))]
+        args += ["--vita_trust_counterfactual_mix", str(_as_float(model_cfg.get("trust_counterfactual_mix", 0.5), name="model.trust_counterfactual_mix"))]
+        args += ["--vita_trust_counterfactual_margin", str(_as_float(model_cfg.get("trust_counterfactual_margin", 0.02), name="model.trust_counterfactual_margin"))]
+        args += ["--vita_trust_counterfactual_weight", str(_as_float(model_cfg.get("trust_counterfactual_weight", 1.0), name="model.trust_counterfactual_weight"))]
         args += ["--vita_trust_gate_floor", str(_as_float(model_cfg.get("trust_gate_floor", 0.0), name="model.trust_gate_floor"))]
+        args += ["--vita_trust_malicious_gate_coef", str(_as_float(model_cfg.get("trust_malicious_gate_coef", 1.0), name="model.trust_malicious_gate_coef"))]
+        args += ["--vita_allocation_sharpness", str(_as_float(model_cfg.get("allocation_sharpness", 1.0), name="model.allocation_sharpness"))]
+        args += ["--vita_allocation_floor", str(_as_float(model_cfg.get("allocation_floor", 0.0), name="model.allocation_floor"))]
         args += ["--vita_comm_dropout", str(_as_float(model_cfg.get("comm_dropout", 0.1), name="model.comm_dropout"))]
         args += ["--vita_comm_sight_range", str(_as_float(model_cfg.get("comm_sight_range", 0.0), name="model.comm_sight_range"))]
         args += ["--vita_max_neighbors", str(_as_int(model_cfg.get("max_neighbors", max(1, num_agents - 1)), name="model.max_neighbors"))]
@@ -284,6 +305,9 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
             _flag_store_true(args, "vita_attention_only", True)
         if bool(model_cfg.get("vib_deterministic", False)):
             _flag_store_true(args, "vita_vib_deterministic", True)
+        if bool(model_cfg.get("trust_hard_topk", False)):
+            _flag_store_true(args, "vita_trust_hard_topk", True)
+        args += ["--vita_trust_topk_k", str(_as_int(model_cfg.get("trust_topk_k", 0), name="model.trust_topk_k"))]
 
         trust_warmup = _as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates")
         trust_delay = _as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates")
