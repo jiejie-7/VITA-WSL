@@ -46,7 +46,7 @@ class VIBGATLayer(nn.Module):
         self.value_proj = nn.Linear(latent_dim, latent_dim)
         self.out_proj = nn.Linear(latent_dim, hidden_dim)
         self.bias_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
@@ -64,9 +64,7 @@ class VIBGATLayer(nn.Module):
         *,
         deterministic: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        neighbor_feat = torch.nan_to_num(neighbor_feat, nan=0.0, posinf=0.0, neginf=0.0)
         norm_neighbors = self.pre_norm(neighbor_feat)
-        norm_neighbors = torch.nan_to_num(norm_neighbors, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self.attention_only:
             messages = self.direct_latent(norm_neighbors)
@@ -100,14 +98,12 @@ class VIBGATLayer(nn.Module):
             kl_for_loss = kl_raw
         kl_scaled = self.kl_beta * kl_for_loss
         uncertainty = torch.mean(torch.exp(logvar), dim=-1, keepdim=True)
-        uncertainty = torch.nan_to_num(uncertainty, nan=1.0, posinf=1.0, neginf=1.0)
         return messages, kl_scaled, kl_raw, uncertainty
 
     def decode_messages(self, messages: torch.Tensor) -> torch.Tensor:
-        messages = torch.nan_to_num(messages, nan=0.0, posinf=0.0, neginf=0.0)
         feat = self.message_decoder(messages)
         feat = self.message_norm(feat)
-        return torch.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
+        return feat
 
     def aggregate_messages(
         self,
@@ -117,7 +113,6 @@ class VIBGATLayer(nn.Module):
         comm_mask: torch.Tensor,
         recv_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        recv_messages = torch.nan_to_num(recv_messages, nan=0.0, posinf=0.0, neginf=0.0)
         if recv_features is None:
             recv_features = self.decode_messages(recv_messages)
 
@@ -126,9 +121,10 @@ class VIBGATLayer(nn.Module):
         values = self.value_proj(recv_messages)
 
         attn_logits = torch.matmul(query, keys.transpose(-2, -1)).squeeze(1) / (keys.size(-1) ** 0.5)
-        bias_input = torch.abs(self_feat.unsqueeze(1) - recv_features)
+        self_context = self_feat.unsqueeze(1).expand(-1, recv_features.size(1), -1)
+        bias_input = torch.cat([self_context, recv_features], dim=-1)
         bias = self.bias_mlp(bias_input).squeeze(-1)
-        attn_logits = attn_logits - self.bias_coef * bias
+        attn_logits = attn_logits + self.bias_coef * bias
 
         trust_mask = torch.nan_to_num(trust_mask, nan=1e-6, posinf=1.0, neginf=1e-6).clamp(min=1e-6, max=1.0)
         trust_term = torch.log(trust_mask.squeeze(-1))
@@ -143,4 +139,4 @@ class VIBGATLayer(nn.Module):
         weighted_values = values * comm_mask
         context = torch.matmul(attn_weights, weighted_values).squeeze(-2)
         comm_feat = self.out_proj(context)
-        return torch.nan_to_num(comm_feat, nan=0.0, posinf=0.0, neginf=0.0)
+        return comm_feat

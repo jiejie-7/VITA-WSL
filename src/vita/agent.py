@@ -25,6 +25,7 @@ class VITAAgentConfig:
     trust_margin_weight: float = 0.5
     trust_margin: float = 0.1
     trust_reliability_mix: float = 0.5
+    trust_utility_mix: float = 0.6
     trust_counterfactual_mix: float = 0.5
     trust_counterfactual_margin: float = 0.02
     trust_counterfactual_weight: float = 1.0
@@ -79,7 +80,9 @@ class VITAAgent(torch.nn.Module):
     def load_state_dict(self, state_dict, strict: bool = True):
         has_trust = any(key.startswith("trust_predictor.") for key in state_dict)
         has_utility_head = any(key.startswith("trust_predictor.utility_head.") for key in state_dict)
-        if (not has_trust) or (not has_utility_head):
+        has_receiver_ctx = any(key.startswith("trust_predictor.receiver_context_net.") for key in state_dict)
+        has_pair_fusion = any(key.startswith("trust_predictor.pair_fusion.") for key in state_dict)
+        if (not has_trust) or (not has_utility_head) or (not has_receiver_ctx) or (not has_pair_fusion):
             return super().load_state_dict(state_dict, strict=False)
         return super().load_state_dict(state_dict, strict=strict)
 
@@ -112,7 +115,6 @@ class VITAAgent(torch.nn.Module):
         flat = neighbor_seq.view(bsz * k, t, dim)
         feat, _ = self.comm_encoder(flat, None, None)
         feat = self.neighbor_norm(feat)
-        feat = torch.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
         return feat.view(bsz, k, -1)
 
     def _mask_logits(self, logits: torch.Tensor, avail_actions: torch.Tensor | None) -> torch.Tensor:
@@ -131,27 +133,30 @@ class VITAAgent(torch.nn.Module):
 
     def _compute_utility(
         self,
+        self_feat: torch.Tensor,
         recv_feat: torch.Tensor,
         neighbor_uncertainty: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         trust_logits, confidence_trust, malicious_logits, utility_logits = self.trust_predictor(
             recv_feat,
             neighbor_uncertainty,
+            receiver_context=self_feat,
         )
-        malicious_prob = torch.sigmoid(malicious_logits)
-        malicious_prob = torch.nan_to_num(malicious_prob, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-        confidence_trust = torch.nan_to_num(confidence_trust, nan=1.0, posinf=1.0, neginf=1.0).clamp(1e-6, 1.0)
+        malicious_prob = torch.sigmoid(malicious_logits).clamp(0.0, 1.0)
+        confidence_trust = confidence_trust.clamp(1e-6, 1.0)
         mix = float(max(0.0, min(1.0, getattr(self.cfg, "trust_reliability_mix", 0.5))))
         malicious_gate_coef = float(max(0.0, getattr(self.cfg, "trust_malicious_gate_coef", 1.0)))
         malicious_gate = (1.0 - malicious_gate_coef * malicious_prob).clamp(0.0, 1.0)
-        reliability = (1.0 - mix) * confidence_trust + mix * malicious_gate
-        reliability = torch.nan_to_num(reliability, nan=1.0, posinf=1.0, neginf=0.0).clamp(1e-6, 1.0)
-        utility_score = torch.sigmoid(utility_logits)
-        utility_score = torch.nan_to_num(utility_score, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        utility_score = torch.sigmoid(utility_logits).clamp(0.0, 1.0)
+        aux_reliability = (1.0 - mix) * confidence_trust + mix * malicious_gate
+        aux_reliability = aux_reliability.clamp(1e-6, 1.0)
+        utility_mix = float(max(0.0, min(1.0, getattr(self.cfg, "trust_utility_mix", 0.6))))
+        reliability = (1.0 - utility_mix) * aux_reliability + utility_mix * utility_score
+        reliability = reliability.clamp(1e-6, 1.0)
         return trust_logits, malicious_logits, utility_logits, reliability, utility_score
 
     def _compute_allocation(self, utility_scores: torch.Tensor) -> torch.Tensor:
-        utility_scores = torch.nan_to_num(utility_scores, nan=1.0, posinf=1.0, neginf=1.0).clamp(1e-6, 1.0)
+        utility_scores = utility_scores.clamp(1e-6, 1.0)
         sharpness = float(max(1e-6, getattr(self.cfg, "allocation_sharpness", 1.0)))
         allocation = utility_scores.pow(sharpness)
         floor = float(getattr(self.cfg, "allocation_floor", 0.0))
@@ -217,7 +222,6 @@ class VITAAgent(torch.nn.Module):
             if bool(valid.any()):
                 log_probs = F.log_softmax(trust_logits, dim=-1)
                 ce = -(neighbor_next_actions * log_probs).sum(dim=-1, keepdim=True)
-                ce = torch.nan_to_num(ce, nan=0.0, posinf=0.0, neginf=0.0)
                 denom = max(float(torch.log(torch.tensor(max(int(trust_logits.size(-1)), 2), device=trust_logits.device))), 1.0)
                 ce = ce / denom
                 loss = loss + (ce * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
@@ -296,7 +300,6 @@ class VITAAgent(torch.nn.Module):
     ) -> torch.Tensor:
         if recv_messages.size(1) == 0:
             return torch.zeros(self_feat.size(0), 0, 1, device=self_feat.device, dtype=self_feat.dtype)
-        utility_scores = []
         base_msg = recv_messages
         base_feat = recv_feat
         base_comm = self.vib_gat.aggregate_messages(
@@ -311,33 +314,31 @@ class VITAAgent(torch.nn.Module):
         base_logp = torch.log_softmax(base_logits, dim=-1)
         base_prob = torch.softmax(base_logits, dim=-1)
 
-        for i in range(base_msg.size(1)):
-            edge_alive = base_comm_mask[:, i, 0]
-            msg_i = base_msg.clone()
-            msg_i[:, i : i + 1, :] = 0.0
-            trust_mask_i = base_trust_mask.clone()
-            trust_mask_i[:, i : i + 1, :] = 0.0
-            comm_mask_i = base_comm_mask.clone()
-            comm_mask_i[:, i : i + 1, :] = 0.0
-            feat_i = self.vib_gat.decode_messages(msg_i)
-            comm_i = self.vib_gat.aggregate_messages(
-                self_feat,
-                msg_i,
-                trust_mask_i,
-                comm_mask_i,
-                recv_features=feat_i,
-            )
-            policy_i = self.residual(self_feat, comm_i, self.comm_enabled, self.comm_strength)
-            logits_i = self._mask_logits(self.policy_head(policy_i), avail_actions)
-            logp_i = torch.log_softmax(logits_i, dim=-1)
-            utility = (base_prob * (base_logp - logp_i)).sum(dim=-1).abs()
-            utility_scores.append(utility * edge_alive)
-        if not utility_scores:
-            return torch.zeros(self_feat.size(0), 0, 1, device=self_feat.device, dtype=self_feat.dtype)
-        utility_scores = torch.stack(utility_scores, dim=1)
+        B, K, D = base_msg.shape
+        eye = torch.eye(K, device=base_msg.device, dtype=base_msg.dtype).view(1, K, K, 1)
+        msg_batch = base_msg.unsqueeze(1).expand(B, K, K, D).clone()
+        msg_batch = msg_batch * (1.0 - eye)
+        trust_batch = base_trust_mask.unsqueeze(1).expand(B, K, K, 1).clone()
+        trust_batch = trust_batch * (1.0 - eye)
+        comm_batch = base_comm_mask.unsqueeze(1).expand(B, K, K, 1).clone()
+        comm_batch = comm_batch * (1.0 - eye)
+        feat_batch = self.vib_gat.decode_messages(msg_batch.reshape(B * K, K, D))
+        self_batch = self_feat.unsqueeze(1).expand(B, K, self_feat.size(-1)).reshape(B * K, self_feat.size(-1))
+        comm_flat = self.vib_gat.aggregate_messages(
+            self_batch,
+            msg_batch.reshape(B * K, K, D),
+            trust_batch.reshape(B * K, K, 1),
+            comm_batch.reshape(B * K, K, 1),
+            recv_features=feat_batch,
+        )
+        policy_flat = self.residual(self_batch, comm_flat, self.comm_enabled, self.comm_strength)
+        logits_flat = self._mask_logits(self.policy_head(policy_flat), None if avail_actions is None else avail_actions.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1))
+        logp_flat = torch.log_softmax(logits_flat, dim=-1)
+        utility_scores = (base_prob.unsqueeze(1) * (base_logp.unsqueeze(1) - logp_flat.view(B, K, -1))).sum(dim=-1).abs()
+        utility_scores = utility_scores * base_comm_mask.squeeze(-1)
         utility_scores = utility_scores / utility_scores.max(dim=1, keepdim=True).values.clamp_min(1e-6)
         utility_scores = utility_scores.unsqueeze(-1) * recv_mask
-        utility_scores = torch.nan_to_num(utility_scores, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        utility_scores = utility_scores.clamp(0.0, 1.0)
         return utility_scores
 
     def _comm_forward(
@@ -356,6 +357,9 @@ class VITAAgent(torch.nn.Module):
     ) -> Dict[str, torch.Tensor]:
         if (not self.comm_enabled) or (self.comm_strength <= 0.0):
             zero = self._zero_scalar(self_feat)
+            bsz = self_feat.size(0)
+            num_neighbors = neighbor_seq.size(1) if neighbor_seq.dim() >= 2 else 0
+            edge_zeros = torch.zeros(bsz, num_neighbors, 1, device=self_feat.device, dtype=self_feat.dtype)
             return {
                 "comm_feat": torch.zeros_like(self_feat),
                 "kl_loss": zero,
@@ -381,6 +385,11 @@ class VITAAgent(torch.nn.Module):
                 "utility_score_mal": zero,
                 "utility_score_clean": zero,
                 "utility_malicious_gap": zero,
+                "edge_reliability": edge_zeros,
+                "edge_allocation": edge_zeros,
+                "edge_utility": edge_zeros,
+                "edge_malicious_prob": edge_zeros,
+                "edge_valid_mask": edge_zeros,
             }
 
         neighbor_feat = self._encode_neighbors(neighbor_seq)
@@ -406,13 +415,11 @@ class VITAAgent(torch.nn.Module):
         recv_feat = self.vib_gat.decode_messages(recv_messages)
 
         trust_logits, malicious_logits, utility_logits, reliability, utility_score = self._compute_utility(
+            self_feat,
             recv_feat,
             sender_uncertainty,
         )
         raw_allocation = self._compute_allocation(reliability)
-        utility_bias = float(max(0.0, getattr(self.cfg, "trust_counterfactual_mix", 0.5)))
-        if utility_score.numel() > 0:
-            raw_allocation = (1.0 - utility_bias) * raw_allocation + utility_bias * utility_score
         raw_allocation = raw_allocation * recv_mask
         allocation_scores, aggregate_mask = self._blend_allocation(raw_allocation, recv_mask)
         attn_trust_mask = allocation_scores * recv_mask + (1e-6 * (1.0 - recv_mask))
@@ -439,8 +446,6 @@ class VITAAgent(torch.nn.Module):
         )
         comm_feat = self.comm_dropout(comm_feat)
 
-        kl_loss = torch.nan_to_num(kl_loss, nan=0.0, posinf=0.0, neginf=0.0)
-        kl_raw = torch.nan_to_num(kl_raw, nan=0.0, posinf=0.0, neginf=0.0)
         if not self.cfg.enable_kl:
             kl_loss = self._zero_scalar(self_feat)
         elif training:
@@ -480,8 +485,7 @@ class VITAAgent(torch.nn.Module):
         comm_kept_neighbors = aggregate_mask.squeeze(-1).sum(dim=-1).mean()
         trust_gate_ratio = comm_kept_neighbors / recv_mask.squeeze(-1).sum(dim=-1).mean().clamp_min(1.0)
 
-        malicious_prob = torch.sigmoid(malicious_logits)
-        malicious_prob = torch.nan_to_num(malicious_prob, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        malicious_prob = torch.sigmoid(malicious_logits).clamp(0.0, 1.0)
 
         comm_malicious_ratio = zero
         trust_malicious_gap = zero
@@ -551,6 +555,11 @@ class VITAAgent(torch.nn.Module):
             "utility_score_mal": utility_score_mal,
             "utility_score_clean": utility_score_clean,
             "utility_malicious_gap": utility_malicious_gap,
+            "edge_reliability": reliability,
+            "edge_allocation": aggregate_mask,
+            "edge_utility": utility_score,
+            "edge_malicious_prob": malicious_prob,
+            "edge_valid_mask": recv_mask,
         }
 
     def _critic_forward(
@@ -582,7 +591,6 @@ class VITAAgent(torch.nn.Module):
         return_debug: bool = False,
     ) -> Dict[str, torch.Tensor]:
         self_feat, next_actor = self.actor_encoder(obs_seq, rnn_states_actor.unsqueeze(0), masks)
-        self_feat = torch.nan_to_num(self_feat, nan=0.0, posinf=0.0, neginf=0.0)
         comm_out = self._comm_forward(
             self_feat,
             neighbor_seq,
@@ -638,7 +646,6 @@ class VITAAgent(torch.nn.Module):
         avail_actions: torch.Tensor | None,
     ) -> Dict[str, torch.Tensor]:
         self_feat, next_actor = self.actor_encoder(obs_seq, rnn_states_actor.unsqueeze(0), masks)
-        self_feat = torch.nan_to_num(self_feat, nan=0.0, posinf=0.0, neginf=0.0)
         comm_out = self._comm_forward(
             self_feat,
             neighbor_seq,
