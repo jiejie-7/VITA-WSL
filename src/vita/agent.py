@@ -24,11 +24,16 @@ class VITAAgentConfig:
     trust_malicious_weight: float = 1.0
     trust_margin_weight: float = 0.5
     trust_margin: float = 0.1
+    trust_action_loss_weight: float = 1.0
     trust_reliability_mix: float = 0.5
     trust_utility_mix: float = 0.6
     trust_counterfactual_mix: float = 0.5
     trust_counterfactual_margin: float = 0.02
     trust_counterfactual_weight: float = 1.0
+    trust_consistency_mix: float = 0.0
+    trust_consistency_weight: float = 0.0
+    trust_consistency_margin: float = 0.05
+    trust_consistency_noise_std: float = 0.0
     max_neighbors: int = 5
     comm_dropout: float = 0.1
     enable_trust: bool = True
@@ -42,6 +47,11 @@ class VITAAgentConfig:
     trust_malicious_gate_coef: float = 1.0
     allocation_sharpness: float = 1.0
     allocation_floor: float = 0.0
+    trust_pair_product: bool = False
+    trust_gate_product: bool = False
+    trust_decouple_allocation: bool = False
+    trust_use_utility_for_gate: bool = True
+    trust_gate_threshold: float = 0.0
 
 
 class VITAAgent(torch.nn.Module):
@@ -51,7 +61,12 @@ class VITAAgent(torch.nn.Module):
         self.actor_encoder = FeatureEncoder(cfg.obs_dim, cfg.hidden_dim)
         self.critic_encoder = FeatureEncoder(cfg.state_dim, cfg.hidden_dim)
         self.comm_encoder = FeatureEncoder(cfg.obs_dim, cfg.hidden_dim)
-        self.trust_predictor = TrustPredictor(cfg.hidden_dim, cfg.action_dim, cfg.trust_gamma)
+        self.trust_predictor = TrustPredictor(
+            cfg.hidden_dim,
+            cfg.action_dim,
+            cfg.trust_gamma,
+            pair_product=cfg.trust_pair_product,
+        )
         self.vib_gat = VIBGATLayer(
             cfg.hidden_dim,
             cfg.latent_dim,
@@ -131,12 +146,63 @@ class VITAAgent(torch.nn.Module):
             mask.scatter_(dim=-1, index=idx, value=False)
         return logits.masked_fill(mask, -1e9)
 
+    def _compute_consistency_score(
+        self,
+        self_feat: torch.Tensor,
+        recv_feat: torch.Tensor,
+        neighbor_uncertainty: torch.Tensor,
+    ) -> torch.Tensor:
+        noise_std = float(max(0.0, getattr(self.cfg, "trust_consistency_noise_std", 0.0)))
+        if noise_std <= 0.0:
+            return torch.ones(
+                recv_feat.size(0),
+                recv_feat.size(1),
+                1,
+                device=recv_feat.device,
+                dtype=recv_feat.dtype,
+            )
+
+        direction = torch.tanh(recv_feat)
+        direction_scale = direction.abs().mean(dim=-1, keepdim=True).clamp_min(1e-6)
+        delta = noise_std * direction / direction_scale
+
+        logits_pos, _, malicious_pos, _ = self.trust_predictor(
+            recv_feat + delta,
+            neighbor_uncertainty,
+            receiver_context=self_feat,
+        )
+        logits_neg, _, malicious_neg, _ = self.trust_predictor(
+            recv_feat - delta,
+            neighbor_uncertainty,
+            receiver_context=self_feat,
+        )
+
+        logp_pos = F.log_softmax(logits_pos, dim=-1)
+        logp_neg = F.log_softmax(logits_neg, dim=-1)
+        prob_pos = logp_pos.exp()
+        prob_neg = logp_neg.exp()
+        mean_prob = (0.5 * (prob_pos + prob_neg)).clamp_min(1e-6)
+        log_mean = mean_prob.log()
+        js = 0.5 * (
+            (prob_pos * (logp_pos - log_mean)).sum(dim=-1, keepdim=True)
+            + (prob_neg * (logp_neg - log_mean)).sum(dim=-1, keepdim=True)
+        )
+        denom = max(
+            float(torch.log(torch.tensor(max(int(logits_pos.size(-1)), 2), device=recv_feat.device))),
+            1.0,
+        )
+        js = js / denom
+
+        malicious_gap = (torch.sigmoid(malicious_pos) - torch.sigmoid(malicious_neg)).abs()
+        instability = 0.5 * js + 0.5 * malicious_gap
+        return (1.0 - instability).clamp(1e-6, 1.0)
+
     def _compute_utility(
         self,
         self_feat: torch.Tensor,
         recv_feat: torch.Tensor,
         neighbor_uncertainty: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         trust_logits, confidence_trust, malicious_logits, utility_logits = self.trust_predictor(
             recv_feat,
             neighbor_uncertainty,
@@ -148,12 +214,24 @@ class VITAAgent(torch.nn.Module):
         malicious_gate_coef = float(max(0.0, getattr(self.cfg, "trust_malicious_gate_coef", 1.0)))
         malicious_gate = (1.0 - malicious_gate_coef * malicious_prob).clamp(0.0, 1.0)
         utility_score = torch.sigmoid(utility_logits).clamp(0.0, 1.0)
-        aux_reliability = (1.0 - mix) * confidence_trust + mix * malicious_gate
-        aux_reliability = aux_reliability.clamp(1e-6, 1.0)
-        utility_mix = float(max(0.0, min(1.0, getattr(self.cfg, "trust_utility_mix", 0.6))))
-        reliability = (1.0 - utility_mix) * aux_reliability + utility_mix * utility_score
+        base_reliability = ((1.0 - mix) * confidence_trust + mix * malicious_gate).clamp(1e-6, 1.0)
+
+        consistency_mix = float(max(0.0, min(1.0, getattr(self.cfg, "trust_consistency_mix", 0.0))))
+        consistency_score = self._compute_consistency_score(self_feat, recv_feat, neighbor_uncertainty)
+        gate_reliability = ((1.0 - consistency_mix) * base_reliability + consistency_mix * consistency_score).clamp(
+            1e-6, 1.0
+        )
+
+        if bool(getattr(self.cfg, "trust_use_utility_for_gate", True)):
+            utility_mix = float(max(0.0, min(1.0, getattr(self.cfg, "trust_utility_mix", 0.6))))
+            if bool(getattr(self.cfg, "trust_gate_product", False)):
+                reliability = gate_reliability * ((1.0 - utility_mix) + utility_mix * utility_score)
+            else:
+                reliability = (1.0 - utility_mix) * gate_reliability + utility_mix * utility_score
+        else:
+            reliability = gate_reliability
         reliability = reliability.clamp(1e-6, 1.0)
-        return trust_logits, malicious_logits, utility_logits, reliability, utility_score
+        return trust_logits, malicious_logits, utility_logits, reliability, utility_score, consistency_score
 
     def _compute_allocation(self, utility_scores: torch.Tensor) -> torch.Tensor:
         utility_scores = utility_scores.clamp(1e-6, 1.0)
@@ -174,7 +252,7 @@ class VITAAgent(torch.nn.Module):
         if topk <= 0:
             return allocation_scores
         scores = allocation_scores.squeeze(-1)
-        valid = recv_mask.squeeze(-1) > 0.5
+        valid = recv_mask.squeeze(-1) > 1e-6
         if not bool(valid.any()):
             return allocation_scores
         masked = scores.masked_fill(~valid, -1e9)
@@ -187,18 +265,36 @@ class VITAAgent(torch.nn.Module):
         hard_mask = hard_mask * valid.float()
         return hard_mask.unsqueeze(-1)
 
-    def _blend_allocation(self, raw_allocation: torch.Tensor, recv_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _apply_gate_threshold(self, gate_scores: torch.Tensor) -> torch.Tensor:
+        threshold = float(max(0.0, min(0.999, getattr(self.cfg, "trust_gate_threshold", 0.0))))
+        if threshold <= 0.0:
+            return gate_scores.clamp(0.0, 1.0)
+        denom = max(1e-6, 1.0 - threshold)
+        return ((gate_scores - threshold) / denom).clamp(0.0, 1.0)
+
+    def _blend_allocation(
+        self,
+        raw_allocation: torch.Tensor,
+        recv_mask: torch.Tensor,
+        gate_scores: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if not self.cfg.enable_trust:
             allocation = torch.ones_like(recv_mask)
             return allocation, recv_mask
 
+        if gate_scores is None:
+            gate_scores = recv_mask
+        gate_scores = self._apply_gate_threshold(gate_scores) * recv_mask
+
         if bool(getattr(self.cfg, "trust_hard_topk", False)):
-            hard_mask = self._apply_hard_topk(raw_allocation, recv_mask)
-            allocation = (1.0 - float(self.trust_strength)) * recv_mask + float(self.trust_strength) * hard_mask
+            hard_mask = self._apply_hard_topk(raw_allocation * gate_scores, gate_scores)
+            trust_branch = gate_scores * hard_mask
+            allocation = (1.0 - float(self.trust_strength)) * recv_mask + float(self.trust_strength) * trust_branch
             aggregate_mask = recv_mask * allocation
             return allocation.clamp(0.0, 1.0), aggregate_mask.clamp(0.0, 1.0)
 
-        allocation = (1.0 - float(self.trust_strength)) + float(self.trust_strength) * raw_allocation
+        trust_branch = gate_scores * raw_allocation
+        allocation = (1.0 - float(self.trust_strength)) * recv_mask + float(self.trust_strength) * trust_branch
         allocation = allocation * recv_mask
         return allocation.clamp(0.0, 1.0), allocation.clamp(0.0, 1.0)
 
@@ -211,10 +307,12 @@ class VITAAgent(torch.nn.Module):
         neighbor_mask: torch.Tensor | None = None,
         neighbor_malicious: torch.Tensor | None = None,
         utility_targets: torch.Tensor | None = None,
+        consistency_scores: torch.Tensor | None = None,
     ) -> torch.Tensor:
         loss = self._zero_scalar(trust_logits)
 
-        if neighbor_next_actions is not None:
+        action_weight = float(max(0.0, getattr(self.cfg, "trust_action_loss_weight", 1.0)))
+        if neighbor_next_actions is not None and action_weight > 0.0:
             has_label = neighbor_next_actions.sum(dim=-1, keepdim=True) > 1e-6
             valid = has_label
             if neighbor_mask is not None:
@@ -224,7 +322,7 @@ class VITAAgent(torch.nn.Module):
                 ce = -(neighbor_next_actions * log_probs).sum(dim=-1, keepdim=True)
                 denom = max(float(torch.log(torch.tensor(max(int(trust_logits.size(-1)), 2), device=trust_logits.device))), 1.0)
                 ce = ce / denom
-                loss = loss + (ce * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
+                loss = loss + action_weight * (ce * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
 
         if neighbor_malicious is None:
             if utility_logits is not None and utility_targets is not None:
@@ -272,6 +370,17 @@ class VITAAgent(torch.nn.Module):
             margin = float(max(0.0, getattr(self.cfg, "trust_margin", 0.1)))
             margin_weight = float(max(0.0, getattr(self.cfg, "trust_margin_weight", 0.5)))
             loss = loss + margin_weight * F.relu(margin - (mal_mean - clean_mean))
+
+        consistency_weight = float(max(0.0, getattr(self.cfg, "trust_consistency_weight", 0.0)))
+        if consistency_scores is not None and consistency_weight > 0.0:
+            consistency_target = (1.0 - target).clamp(0.0, 1.0)
+            mse = F.mse_loss(consistency_scores, consistency_target, reduction="none")
+            loss = loss + consistency_weight * (mse * mal_mask.float()).sum() / mal_mask.float().sum().clamp_min(1.0)
+            if bool(mal_bool.any()) and bool(clean_bool.any()):
+                clean_consistency = consistency_scores[clean_bool].mean()
+                mal_consistency = consistency_scores[mal_bool].mean()
+                margin = float(max(0.0, getattr(self.cfg, "trust_consistency_margin", 0.05)))
+                loss = loss + consistency_weight * F.relu(margin - (clean_consistency - mal_consistency))
 
         if utility_logits is not None and utility_targets is not None:
             util_mask = mal_mask if neighbor_mask is None else (neighbor_mask > 0.5)
@@ -385,9 +494,14 @@ class VITAAgent(torch.nn.Module):
                 "utility_score_mal": zero,
                 "utility_score_clean": zero,
                 "utility_malicious_gap": zero,
+                "consistency_score_mean": zero,
+                "consistency_score_mal": zero,
+                "consistency_score_clean": zero,
+                "consistency_malicious_gap": zero,
                 "edge_reliability": edge_zeros,
                 "edge_allocation": edge_zeros,
                 "edge_utility": edge_zeros,
+                "edge_consistency": edge_zeros,
                 "edge_malicious_prob": edge_zeros,
                 "edge_valid_mask": edge_zeros,
             }
@@ -414,14 +528,15 @@ class VITAAgent(torch.nn.Module):
         recv_messages = recv_messages * recv_mask
         recv_feat = self.vib_gat.decode_messages(recv_messages)
 
-        trust_logits, malicious_logits, utility_logits, reliability, utility_score = self._compute_utility(
+        trust_logits, malicious_logits, utility_logits, reliability, utility_score, consistency_score = self._compute_utility(
             self_feat,
             recv_feat,
             sender_uncertainty,
         )
-        raw_allocation = self._compute_allocation(reliability)
+        allocation_source = utility_score if bool(getattr(self.cfg, "trust_decouple_allocation", False)) else reliability
+        raw_allocation = self._compute_allocation(allocation_source)
         raw_allocation = raw_allocation * recv_mask
-        allocation_scores, aggregate_mask = self._blend_allocation(raw_allocation, recv_mask)
+        allocation_scores, aggregate_mask = self._blend_allocation(raw_allocation, recv_mask, gate_scores=reliability)
         attn_trust_mask = allocation_scores * recv_mask + (1e-6 * (1.0 - recv_mask))
 
         utility_targets = None
@@ -461,6 +576,7 @@ class VITAAgent(torch.nn.Module):
                 neighbor_mask=recv_mask,
                 neighbor_malicious=neighbor_malicious,
                 utility_targets=utility_targets,
+                consistency_scores=consistency_score,
             )
 
         valid_mask = (recv_mask > 0.5).squeeze(-1)
@@ -500,11 +616,16 @@ class VITAAgent(torch.nn.Module):
         utility_score_mal = zero
         utility_score_clean = zero
         utility_malicious_gap = zero
+        consistency_score_mean = zero
+        consistency_score_mal = zero
+        consistency_score_clean = zero
+        consistency_malicious_gap = zero
 
         if utility_values.numel() > 0:
             allocation_score_mean = aggregate_mask.squeeze(-1)[valid_mask].mean()
             malicious_score_mean = malicious_prob.squeeze(-1)[valid_mask].mean()
             utility_score_mean = utility_score.squeeze(-1)[valid_mask].mean()
+            consistency_score_mean = consistency_score.squeeze(-1)[valid_mask].mean()
 
         if neighbor_malicious is not None:
             mal_mask = (neighbor_malicious > 0.5).squeeze(-1) & valid_mask
@@ -515,6 +636,7 @@ class VITAAgent(torch.nn.Module):
                 malicious_score_mal = malicious_prob.squeeze(-1)[mal_mask].mean()
                 allocation_score_mal = aggregate_mask.squeeze(-1)[mal_mask].mean()
                 utility_score_mal = utility_score.squeeze(-1)[mal_mask].mean()
+                consistency_score_mal = consistency_score.squeeze(-1)[mal_mask].mean()
                 trust_mal = reliability.squeeze(-1)[mal_mask].mean()
             else:
                 trust_mal = zero
@@ -522,6 +644,7 @@ class VITAAgent(torch.nn.Module):
                 malicious_score_clean = malicious_prob.squeeze(-1)[clean_mask].mean()
                 allocation_score_clean = aggregate_mask.squeeze(-1)[clean_mask].mean()
                 utility_score_clean = utility_score.squeeze(-1)[clean_mask].mean()
+                consistency_score_clean = consistency_score.squeeze(-1)[clean_mask].mean()
                 trust_clean = reliability.squeeze(-1)[clean_mask].mean()
             else:
                 trust_clean = zero
@@ -529,6 +652,7 @@ class VITAAgent(torch.nn.Module):
                 trust_malicious_gap = trust_clean - trust_mal
                 allocation_malicious_gap = allocation_score_clean - allocation_score_mal
                 utility_malicious_gap = utility_score_clean - utility_score_mal
+                consistency_malicious_gap = consistency_score_clean - consistency_score_mal
 
         return {
             "comm_feat": comm_feat,
@@ -555,9 +679,14 @@ class VITAAgent(torch.nn.Module):
             "utility_score_mal": utility_score_mal,
             "utility_score_clean": utility_score_clean,
             "utility_malicious_gap": utility_malicious_gap,
+            "consistency_score_mean": consistency_score_mean,
+            "consistency_score_mal": consistency_score_mal,
+            "consistency_score_clean": consistency_score_clean,
+            "consistency_malicious_gap": consistency_malicious_gap,
             "edge_reliability": reliability,
             "edge_allocation": aggregate_mask,
             "edge_utility": utility_score,
+            "edge_consistency": consistency_score,
             "edge_malicious_prob": malicious_prob,
             "edge_valid_mask": recv_mask,
         }

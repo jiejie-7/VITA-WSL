@@ -96,11 +96,16 @@ class R_VITAPolicy:
             trust_malicious_weight=float(getattr(args, "vita_trust_malicious_weight", 1.0)),
             trust_margin_weight=float(getattr(args, "vita_trust_margin_weight", 0.5)),
             trust_margin=float(getattr(args, "vita_trust_margin", 0.1)),
+            trust_action_loss_weight=float(getattr(args, "vita_trust_action_loss_weight", 1.0)),
             trust_reliability_mix=float(getattr(args, "vita_trust_reliability_mix", 0.5)),
             trust_utility_mix=float(getattr(args, "vita_trust_utility_mix", 0.6)),
             trust_counterfactual_mix=float(getattr(args, "vita_trust_counterfactual_mix", 0.5)),
             trust_counterfactual_margin=float(getattr(args, "vita_trust_counterfactual_margin", 0.02)),
             trust_counterfactual_weight=float(getattr(args, "vita_trust_counterfactual_weight", 1.0)),
+            trust_consistency_mix=float(getattr(args, "vita_trust_consistency_mix", 0.0)),
+            trust_consistency_weight=float(getattr(args, "vita_trust_consistency_weight", 0.0)),
+            trust_consistency_margin=float(getattr(args, "vita_trust_consistency_margin", 0.05)),
+            trust_consistency_noise_std=float(getattr(args, "vita_trust_consistency_noise_std", 0.0)),
             max_neighbors=int(getattr(args, "vita_max_neighbors", 4)),
             comm_dropout=float(getattr(args, "vita_comm_dropout", 0.1)),
             enable_trust=not bool(getattr(args, "vita_disable_trust", False)),
@@ -113,6 +118,11 @@ class R_VITAPolicy:
             trust_malicious_gate_coef=float(getattr(args, "vita_trust_malicious_gate_coef", 1.0)),
             allocation_sharpness=float(getattr(args, "vita_allocation_sharpness", 1.0)),
             allocation_floor=float(getattr(args, "vita_allocation_floor", 0.0)),
+            trust_pair_product=bool(getattr(args, "vita_trust_pair_product", False)),
+            trust_gate_product=bool(getattr(args, "vita_trust_gate_product", False)),
+            trust_decouple_allocation=bool(getattr(args, "vita_trust_decouple_allocation", False)),
+            trust_use_utility_for_gate=not bool(getattr(args, "vita_trust_disable_utility_gate", False)),
+            trust_gate_threshold=float(getattr(args, "vita_trust_gate_threshold", 0.0)),
             attn_bias_coef=float(getattr(args, "vita_attn_bias_coef", 1.0)),
         )
 
@@ -395,6 +405,10 @@ class R_VITAPolicy:
                 "comm_enabled": float(eval_out["comm_enabled"].item()),
                 "comm_malicious_ratio": float(eval_out["comm_malicious_ratio"].item()),
                 "trust_malicious_gap": float(eval_out["trust_malicious_gap"].item()),
+                "consistency_score_mean": float(eval_out["consistency_score_mean"].item()),
+                "consistency_score_mal": float(eval_out["consistency_score_mal"].item()),
+                "consistency_score_clean": float(eval_out["consistency_score_clean"].item()),
+                "consistency_malicious_gap": float(eval_out["consistency_malicious_gap"].item()),
                 "residual_gate_mean": float(eval_out["residual_gate_mean"].item()),
                 "residual_gate_max": float(eval_out["residual_gate_max"].item()),
                 "residual_comm_ratio": float(eval_out["residual_comm_ratio"].item()),
@@ -446,6 +460,10 @@ class R_VITAPolicy:
         comm_kept_neighbors_list = []
         comm_malicious_ratio_list = []
         trust_malicious_gap_list = []
+        consistency_score_mean_list = []
+        consistency_score_mal_list = []
+        consistency_score_clean_list = []
+        consistency_malicious_gap_list = []
         residual_gate_mean_list = []
         residual_gate_max_list = []
         residual_comm_ratio_list = []
@@ -491,6 +509,10 @@ class R_VITAPolicy:
             comm_kept_neighbors_list.append(eval_out["comm_kept_neighbors"])
             comm_malicious_ratio_list.append(eval_out["comm_malicious_ratio"])
             trust_malicious_gap_list.append(eval_out["trust_malicious_gap"])
+            consistency_score_mean_list.append(eval_out["consistency_score_mean"])
+            consistency_score_mal_list.append(eval_out["consistency_score_mal"])
+            consistency_score_clean_list.append(eval_out["consistency_score_clean"])
+            consistency_malicious_gap_list.append(eval_out["consistency_malicious_gap"])
             residual_gate_mean_list.append(eval_out["residual_gate_mean"])
             residual_gate_max_list.append(eval_out["residual_gate_max"])
             residual_comm_ratio_list.append(eval_out["residual_comm_ratio"])
@@ -516,6 +538,10 @@ class R_VITAPolicy:
         comm_kept_neighbors = torch.stack(comm_kept_neighbors_list, dim=0).mean() if comm_kept_neighbors_list else torch.zeros(1, device=self.device)
         comm_malicious_ratio = torch.stack(comm_malicious_ratio_list, dim=0).mean() if comm_malicious_ratio_list else torch.zeros(1, device=self.device)
         trust_malicious_gap = torch.stack(trust_malicious_gap_list, dim=0).mean() if trust_malicious_gap_list else torch.zeros(1, device=self.device)
+        consistency_score_mean = torch.stack(consistency_score_mean_list, dim=0).mean() if consistency_score_mean_list else torch.zeros(1, device=self.device)
+        consistency_score_mal = torch.stack(consistency_score_mal_list, dim=0).mean() if consistency_score_mal_list else torch.zeros(1, device=self.device)
+        consistency_score_clean = torch.stack(consistency_score_clean_list, dim=0).mean() if consistency_score_clean_list else torch.zeros(1, device=self.device)
+        consistency_malicious_gap = torch.stack(consistency_malicious_gap_list, dim=0).mean() if consistency_malicious_gap_list else torch.zeros(1, device=self.device)
         residual_gate_mean = torch.stack(residual_gate_mean_list, dim=0).mean() if residual_gate_mean_list else torch.zeros(1, device=self.device)
         residual_gate_max = torch.stack(residual_gate_max_list, dim=0).mean() if residual_gate_max_list else torch.zeros(1, device=self.device)
         residual_comm_ratio = torch.stack(residual_comm_ratio_list, dim=0).mean() if residual_comm_ratio_list else torch.zeros(1, device=self.device)
@@ -530,6 +556,10 @@ class R_VITAPolicy:
             "comm_kept_neighbors": float(comm_kept_neighbors.item()),
             "comm_malicious_ratio": float(comm_malicious_ratio.item()),
             "trust_malicious_gap": float(trust_malicious_gap.item()),
+            "consistency_score_mean": float(consistency_score_mean.item()),
+            "consistency_score_mal": float(consistency_score_mal.item()),
+            "consistency_score_clean": float(consistency_score_clean.item()),
+            "consistency_malicious_gap": float(consistency_malicious_gap.item()),
             "comm_strength": float(comm_strength.item()) if comm_strength is not None else 0.0,
             "trust_strength": float(trust_strength.item()) if trust_strength is not None else 0.0,
             "comm_enabled": float(comm_enabled.item()) if comm_enabled is not None else 0.0,

@@ -283,6 +283,8 @@ def get_config():
                         help="aux weight for separating clean/malicious trust logits")
     parser.add_argument("--vita_trust_margin", type=float, default=0.1,
                         help="margin used by VITA trust separation losses")
+    parser.add_argument("--vita_trust_action_loss_weight", type=float, default=1.0,
+                        help="weight on the action-prediction CE inside VITA trust loss")
     parser.add_argument("--vita_trust_reliability_mix", type=float, default=0.5,
                         help="mix confidence trust with malicious-gate reliability")
     parser.add_argument("--vita_trust_utility_mix", type=float, default=0.6,
@@ -293,6 +295,14 @@ def get_config():
                         help="margin for counterfactual utility ranking loss")
     parser.add_argument("--vita_trust_counterfactual_weight", type=float, default=1.0,
                         help="weight for counterfactual utility supervision")
+    parser.add_argument("--vita_trust_consistency_mix", type=float, default=0.0,
+                        help="mix receiver-side consistency with the reliability gate")
+    parser.add_argument("--vita_trust_consistency_weight", type=float, default=0.0,
+                        help="supervision weight for separating clean/malicious consistency scores")
+    parser.add_argument("--vita_trust_consistency_margin", type=float, default=0.05,
+                        help="margin used for clean-vs-malicious consistency separation")
+    parser.add_argument("--vita_trust_consistency_noise_std", type=float, default=0.0,
+                        help="deterministic perturbation scale used to probe receiver-side trust consistency")
     parser.add_argument("--vita_comm_dropout", type=float, default=0.1)
     parser.add_argument("--vita_attn_bias_coef", type=float, default=1.0)
     parser.add_argument("--vita_trust_gate_floor", type=float, default=0.0,
@@ -303,6 +313,16 @@ def get_config():
                         help="sharpness exponent for VITA utility allocation")
     parser.add_argument("--vita_allocation_floor", type=float, default=0.0,
                         help="minimum allocation score before trust blending")
+    parser.add_argument("--vita_trust_pair_product", action="store_true", default=False,
+                        help="Use sender*receiver interaction instead of absolute feature difference in VITA trust.")
+    parser.add_argument("--vita_trust_gate_product", action="store_true", default=False,
+                        help="Use reliability-weighted utility product for VITA trust allocation.")
+    parser.add_argument("--vita_trust_decouple_allocation", action="store_true", default=False,
+                        help="Use trust only for gating and utility only for allocation in VITA.")
+    parser.add_argument("--vita_trust_disable_utility_gate", action="store_true", default=False,
+                        help="Do not mix utility into the VITA trust gate; use it only for allocation.")
+    parser.add_argument("--vita_trust_gate_threshold", type=float, default=0.0,
+                        help="Soft threshold applied to VITA reliability before trust gating.")
     parser.add_argument("--vita_comm_sight_range", type=float, default=0.0,
                         help="If >0, override per-agent sight range for communication.")
     parser.add_argument("--vita_max_neighbors", type=int, default=4)

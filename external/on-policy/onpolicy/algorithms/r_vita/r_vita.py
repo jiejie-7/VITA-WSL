@@ -244,6 +244,10 @@ class R_VITA:
             "comm_kept_neighbors": 0.0,
             "comm_malicious_ratio": 0.0,
             "trust_malicious_gap": 0.0,
+            "consistency_score_mean": 0.0,
+            "consistency_score_mal": 0.0,
+            "consistency_score_clean": 0.0,
+            "consistency_malicious_gap": 0.0,
             "comm_strength": 0.0,
             "trust_strength": 0.0,
             "comm_enabled": 0.0,
@@ -291,6 +295,10 @@ class R_VITA:
                 train_info["comm_kept_neighbors"] += float(debug.get("comm_kept_neighbors", 0.0))
                 train_info["comm_malicious_ratio"] += float(debug.get("comm_malicious_ratio", 0.0))
                 train_info["trust_malicious_gap"] += float(debug.get("trust_malicious_gap", 0.0))
+                train_info["consistency_score_mean"] += float(debug.get("consistency_score_mean", 0.0))
+                train_info["consistency_score_mal"] += float(debug.get("consistency_score_mal", 0.0))
+                train_info["consistency_score_clean"] += float(debug.get("consistency_score_clean", 0.0))
+                train_info["consistency_malicious_gap"] += float(debug.get("consistency_malicious_gap", 0.0))
                 train_info["comm_strength"] += float(debug.get("comm_strength", 0.0))
                 train_info["trust_strength"] += float(debug.get("trust_strength", 0.0))
                 train_info["comm_enabled"] += float(debug.get("comm_enabled", 0.0))

@@ -12,7 +12,14 @@ import torch.nn.functional as F
 class TrustPredictor(nn.Module):
     """Trust estimator with confidence, maliciousness, and utility heads."""
 
-    def __init__(self, hidden_dim: int, action_dim: int, gamma: float):
+    def __init__(
+        self,
+        hidden_dim: int,
+        action_dim: int,
+        gamma: float,
+        *,
+        pair_product: bool = False,
+    ):
         super().__init__()
         self.net = nn.Sequential(nn.Linear(hidden_dim + 1, hidden_dim), nn.ReLU())
         self.receiver_context_net = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
@@ -21,6 +28,7 @@ class TrustPredictor(nn.Module):
         self.malicious_head = nn.Linear(hidden_dim, 1)
         self.utility_head = nn.Linear(hidden_dim, 1)
         self.gamma = float(gamma)
+        self.pair_product = bool(pair_product)
 
     def forward(
         self,
@@ -57,14 +65,11 @@ class TrustPredictor(nn.Module):
         x = torch.cat([neighbor_feat, neighbor_uncertainty], dim=-1)
         sender_hidden = self.net(x)
         receiver_hidden = self.receiver_context_net(receiver_context).unsqueeze(1).expand(-1, neighbor_feat.size(1), -1)
-        pair_input = torch.cat(
-            [
-                sender_hidden,
-                receiver_hidden,
-                torch.abs(sender_hidden - receiver_hidden),
-            ],
-            dim=-1,
-        )
+        if self.pair_product:
+            pair_relation = sender_hidden * receiver_hidden
+        else:
+            pair_relation = torch.abs(sender_hidden - receiver_hidden)
+        pair_input = torch.cat([sender_hidden, receiver_hidden, pair_relation], dim=-1)
         hidden = sender_hidden + self.pair_fusion(pair_input)
         logits = self.action_head(hidden)
         log_probs = F.log_softmax(logits, dim=-1)
