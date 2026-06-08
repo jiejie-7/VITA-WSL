@@ -158,7 +158,7 @@ def get_config():
 
     # prepare parameters
     parser.add_argument("--algorithm_name", type=str,
-                        default='mappo', choices=["rmappo", "mappo", "happo", "hatrpo", "mat", "mat_dec", "rvita"])
+                        default='mappo', choices=["rmappo", "mappo", "happo", "hatrpo", "mat", "mat_dec", "rvita", "rtarmac"])
 
     parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.")
     parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch")
@@ -276,6 +276,10 @@ def get_config():
     parser.add_argument("--vita_kl_beta", type=float, default=1e-3)
     parser.add_argument("--vita_kl_free_bits", type=float, default=0.0,
                         help="minimum KL (free-bits) used in VIB loss; 0 disables")
+    parser.add_argument("--vita_vib_consistency_weight", type=float, default=0.0,
+                        help="weight for sender-side dual-view VIB latent consistency regularization")
+    parser.add_argument("--vita_vib_consistency_noise_std", type=float, default=0.0,
+                        help="observation perturbation std used to build two training-only VIB consistency views")
     parser.add_argument("--vita_trust_lambda", type=float, default=0.1)
     parser.add_argument("--vita_trust_malicious_weight", type=float, default=1.0,
                         help="aux weight for malicious-trust loss (higher = stronger separation)")
@@ -353,6 +357,11 @@ def get_config():
     parser.add_argument("--vita_comm_delay_updates", type=int, default=0)
     parser.add_argument("--vita_comm_warmup_updates", type=int, default=0)
     parser.add_argument("--vita_comm_full_warmup_updates", type=int, default=0)
+
+    # TarMAC baseline parameters (MAPPO backbone, VITA-aligned neighbor/noise tensors).
+    parser.add_argument("--tarmac_comm_passes", type=int, default=2)
+    parser.add_argument("--tarmac_attn_dim", type=int, default=16)
+    parser.add_argument("--tarmac_comm_dropout", type=float, default=0.0)
 
     # run parameters
     parser.add_argument("--use_linear_lr_decay", action='store_true',

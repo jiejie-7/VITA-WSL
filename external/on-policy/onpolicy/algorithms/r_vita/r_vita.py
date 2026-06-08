@@ -144,7 +144,15 @@ class R_VITA:
         return_batch = check(return_batch).to(**self.tpdv)
         active_masks_batch = check(active_masks_batch).to(**self.tpdv)
 
-        values, action_log_probs, dist_entropy, kl_loss, trust_loss, debug = self.policy.evaluate_actions_vita(
+        (
+            values,
+            action_log_probs,
+            dist_entropy,
+            kl_loss,
+            trust_loss,
+            vib_consistency_loss,
+            debug,
+        ) = self.policy.evaluate_actions_vita(
             share_obs_batch,
             obs_batch,
             rnn_states_batch,
@@ -182,6 +190,7 @@ class R_VITA:
                 - dist_entropy * self.entropy_coef
                 + kl_coeff * kl_loss
                 + trust_coeff * trust_loss
+                + vib_consistency_loss
             ).backward()
 
         if self._use_max_grad_norm:
@@ -210,6 +219,7 @@ class R_VITA:
             imp_weights,
             kl_loss,
             trust_loss,
+            vib_consistency_loss,
             debug,
         )
 
@@ -234,6 +244,8 @@ class R_VITA:
             "ratio": 0.0,
             "kl": 0.0,
             "kl_raw": 0.0,
+            "vib_consistency_loss": 0.0,
+            "vib_consistency_raw": 0.0,
             "trust_loss": 0.0,
             "trust_score_mean": 0.0,
             "trust_score_p10": 0.0,
@@ -274,6 +286,7 @@ class R_VITA:
                     imp_weights,
                     kl_loss,
                     trust_loss,
+                    vib_consistency_loss,
                     debug,
                 ) = self.ppo_update(sample, update_actor)
 
@@ -285,7 +298,9 @@ class R_VITA:
                 train_info["ratio"] += float(imp_weights.mean().item())
                 train_info["kl"] += float(kl_loss.item())
                 train_info["trust_loss"] += float(trust_loss.item())
+                train_info["vib_consistency_loss"] += float(vib_consistency_loss.item())
                 train_info["kl_raw"] += float(debug.get("kl_raw", 0.0))
+                train_info["vib_consistency_raw"] += float(debug.get("vib_consistency_raw", 0.0))
                 train_info["trust_score_mean"] += float(debug.get("trust_score_mean", 0.0))
                 train_info["trust_score_p10"] += float(debug.get("trust_score_p10", 0.0))
                 train_info["trust_score_p50"] += float(debug.get("trust_score_p50", 0.0))

@@ -694,9 +694,30 @@ class SmacWrapper(object):
             info["malicious_mask"] = self._malicious_mask.copy()
         if self._comm_malicious_mask is not None:
             info["comm_malicious_mask"] = self._comm_malicious_mask.copy()
+        agent_meta = self._agent_meta_info()
+        if agent_meta:
+            info.update(agent_meta)
         if self._last_avail_actions is not None:
             info["avail_actions"] = self._last_avail_actions
         return info
+
+    def _agent_meta_info(self):
+        agents = getattr(self.env, "agents", None)
+        n_agents = int(getattr(self, "n_agents", 0) or 0)
+        if not isinstance(agents, dict) or n_agents <= 0:
+            return {}
+        agent_positions = np.zeros((n_agents, 2), dtype=np.float32)
+        alive_mask = np.zeros((n_agents,), dtype=np.float32)
+        for agent_id in range(n_agents):
+            unit = agents.get(agent_id)
+            if unit is None:
+                continue
+            pos = getattr(unit, "pos", None)
+            if pos is not None:
+                agent_positions[agent_id, 0] = float(getattr(pos, "x", 0.0))
+                agent_positions[agent_id, 1] = float(getattr(pos, "y", 0.0))
+            alive_mask[agent_id] = 1.0 if float(getattr(unit, "health", 0.0)) > 0.0 else 0.0
+        return {"agent_positions": agent_positions, "alive_mask": alive_mask}
 
     def _inject_noise_info(self, info):
         if not isinstance(info, dict):

@@ -70,7 +70,12 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
     experiment_name = str(cfg.get("experiment_name") or cfg.get("experiment") or config_path.stem)
 
     top_algo = str(cfg.get("algorithm") or "").lower()
-    default_algorithm = "rvita" if top_algo in {"vita", "rvita"} else "rmappo"
+    if top_algo in {"vita", "rvita"}:
+        default_algorithm = "rvita"
+    elif top_algo in {"tarmac", "rtarmac"}:
+        default_algorithm = "rtarmac"
+    else:
+        default_algorithm = "rmappo"
     algorithm_name = str(onpolicy_cfg.get("algorithm_name") or default_algorithm)
     env_name = str(onpolicy_cfg.get("env_name") or "StarCraft2")
 
@@ -124,6 +129,8 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
         args += ["--vita_trust_gamma", str(_as_float(model_cfg.get("trust_gamma", 1.0), name="model.trust_gamma"))]
         args += ["--vita_kl_beta", str(_as_float(model_cfg.get("kl_beta", 1e-3), name="model.kl_beta"))]
         args += ["--vita_kl_free_bits", str(_as_float(model_cfg.get("kl_free_bits", 0.0), name="model.kl_free_bits"))]
+        args += ["--vita_vib_consistency_weight", str(_as_float(model_cfg.get("vib_consistency_weight", 0.0), name="model.vib_consistency_weight"))]
+        args += ["--vita_vib_consistency_noise_std", str(_as_float(model_cfg.get("vib_consistency_noise_std", 0.0), name="model.vib_consistency_noise_std"))]
         args += ["--vita_attn_bias_coef", str(_as_float(model_cfg.get("attn_bias_coef", 1.0), name="model.attn_bias_coef"))]
         args += ["--vita_trust_lambda", str(_as_float(model_cfg.get("trust_lambda", 0.1), name="model.trust_lambda"))]
         args += ["--vita_trust_malicious_weight", str(_as_float(model_cfg.get("trust_malicious_weight", 1.0), name="model.trust_malicious_weight"))]
@@ -180,6 +187,20 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
         args += ["--vita_comm_delay_updates", str(_as_int(train_cfg.get("comm_delay_updates", 0), name="train.comm_delay_updates"))]
         args += ["--vita_comm_warmup_updates", str(_as_int(train_cfg.get("comm_warmup_updates", 0), name="train.comm_warmup_updates"))]
         args += ["--vita_comm_full_warmup_updates", str(_as_int(train_cfg.get("comm_full_warmup_updates", 0), name="train.comm_full_warmup_updates"))]
+    elif algorithm_name == "rtarmac":
+        history_length = _as_int(model_cfg.get("history_length", 1), name="model.history_length")
+        args += ["--stacked_frames", str(history_length)]
+        _flag_store_true(args, "use_stacked_frames", history_length > 1)
+
+        message_dim = _as_int(model_cfg.get("message_dim", hidden_size), name="model.message_dim")
+        if message_dim != hidden_size:
+            raise ValueError("rtarmac currently requires model.message_dim == model.hidden_dim.")
+        args += ["--vita_latent_dim", str(message_dim)]
+        args += ["--vita_comm_sight_range", str(_as_float(model_cfg.get("comm_sight_range", 0.0), name="model.comm_sight_range"))]
+        args += ["--vita_max_neighbors", str(_as_int(model_cfg.get("max_neighbors", 4), name="model.max_neighbors"))]
+        args += ["--tarmac_comm_passes", str(_as_int(model_cfg.get("comm_passes", 2), name="model.comm_passes"))]
+        args += ["--tarmac_attn_dim", str(_as_int(model_cfg.get("attn_dim", 16), name="model.attn_dim"))]
+        args += ["--tarmac_comm_dropout", str(_as_float(model_cfg.get("comm_dropout", 0.0), name="model.comm_dropout"))]
 
     args += ["--log_interval", str(_as_int(train_cfg.get("log_interval", 1), name="train.log_interval"))]
     args += ["--save_interval", str(_as_int(train_cfg.get("save_interval", 1), name="train.save_interval"))]
@@ -232,7 +253,12 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
     experiment_name = str(cfg.get("experiment_name") or cfg.get("experiment") or config_path.stem)
 
     top_algo = str(cfg.get("algorithm") or "").lower()
-    default_algorithm = "rvita" if top_algo in {"vita", "rvita"} else "rmappo"
+    if top_algo in {"vita", "rvita"}:
+        default_algorithm = "rvita"
+    elif top_algo in {"tarmac", "rtarmac"}:
+        default_algorithm = "rtarmac"
+    else:
+        default_algorithm = "rmappo"
     algorithm_name = str(onpolicy_cfg.get("algorithm_name") or default_algorithm)
     env_name = str(onpolicy_cfg.get("env_name") or "Football")
 
@@ -296,6 +322,8 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
         args += ["--vita_trust_gamma", str(_as_float(model_cfg.get("trust_gamma", 1.0), name="model.trust_gamma"))]
         args += ["--vita_kl_beta", str(_as_float(model_cfg.get("kl_beta", 1e-3), name="model.kl_beta"))]
         args += ["--vita_kl_free_bits", str(_as_float(model_cfg.get("kl_free_bits", 0.0), name="model.kl_free_bits"))]
+        args += ["--vita_vib_consistency_weight", str(_as_float(model_cfg.get("vib_consistency_weight", 0.0), name="model.vib_consistency_weight"))]
+        args += ["--vita_vib_consistency_noise_std", str(_as_float(model_cfg.get("vib_consistency_noise_std", 0.0), name="model.vib_consistency_noise_std"))]
         args += ["--vita_attn_bias_coef", str(_as_float(model_cfg.get("attn_bias_coef", 1.0), name="model.attn_bias_coef"))]
         args += ["--vita_trust_lambda", str(_as_float(model_cfg.get("trust_lambda", 0.1), name="model.trust_lambda"))]
         args += ["--vita_trust_malicious_weight", str(_as_float(model_cfg.get("trust_malicious_weight", 1.0), name="model.trust_malicious_weight"))]

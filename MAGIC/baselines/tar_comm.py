@@ -46,6 +46,8 @@ class TarCommNetMLP(nn.Module):
         self.comm_malicious_noise_scale = float(getattr(args, 'comm_malicious_noise_scale', 0.0))
         self.comm_malicious_mode = str(getattr(args, 'comm_malicious_mode', 'bernoulli')).strip().lower()
         self.comm_malicious_fixed_agent_id = int(getattr(args, 'comm_malicious_fixed_agent_id', 0))
+        self.comm_sight_range = float(getattr(args, 'comm_sight_range', 0.0))
+        self.max_neighbors = int(getattr(args, 'max_neighbors', 0))
         seed = getattr(args, 'seed', None)
         if seed is not None:
             try:
@@ -255,6 +257,9 @@ class TarCommNetMLP(nn.Module):
             # scores = scores.masked_fill(comm_action_mask.squeeze(-1) == 0, -1e9)
             # Use agent_mask instead of comm_action_mask to make this work in tj env
             scores = scores.masked_fill(agent_mask.squeeze(-1) == 0, -1e9)
+            topology_mask = self._comm_topology_mask(info, batch_size, n, scores.device)
+            if topology_mask is not None:
+                scores = scores.masked_fill(topology_mask, -1e9)
             drop_mask = self._sample_comm_drop(scores, agent_mask, agent_mask_transpose)
             if drop_mask is not None:
                 scores = scores.masked_fill(drop_mask, -1e9)
@@ -263,6 +268,8 @@ class TarCommNetMLP(nn.Module):
             attn = F.softmax(scores, dim=-1)
             # if the scores are all -1e9 for all agents, the attns should be all 0 (fixed from the original version)
             attn = attn * agent_mask.squeeze(-1) # cannot use inplace operation *=
+            if topology_mask is not None:
+                attn = attn.masked_fill(topology_mask, 0.0)
             if drop_mask is not None:
                 attn = attn.masked_fill(drop_mask, 0.0)
             comm = torch.matmul(attn, value)
@@ -349,6 +356,58 @@ class TarCommNetMLP(nn.Module):
         if sender_mask is not None:
             comm = comm * sender_mask
         return comm
+
+    def _comm_topology_mask(self, info, batch_size, n, device):
+        if self.comm_sight_range <= 0.0 and self.max_neighbors <= 0:
+            return None
+        if not isinstance(info, dict) or 'agent_positions' not in info:
+            return None
+
+        positions = torch.as_tensor(info.get('agent_positions'), dtype=torch.double, device=device)
+        if positions.dim() == 2:
+            positions = positions.unsqueeze(0)
+        elif positions.dim() > 3:
+            positions = positions.view(batch_size, n, 2)
+        if positions.dim() != 3 or positions.size(1) != n or positions.size(2) != 2:
+            return None
+        if positions.size(0) == 1 and batch_size > 1:
+            positions = positions.expand(batch_size, -1, -1)
+        if positions.size(0) != batch_size:
+            return None
+
+        diff = positions[:, :, None, :] - positions[:, None, :, :]
+        dist = torch.norm(diff, dim=-1)
+        valid = torch.ones((batch_size, n, n), dtype=torch.bool, device=device)
+
+        eye = torch.eye(n, dtype=torch.bool, device=device).unsqueeze(0)
+        valid = valid & (~eye)
+
+        if self.comm_sight_range > 0.0:
+            valid = valid & (dist <= float(self.comm_sight_range) + 1e-6)
+
+        alive = info.get('alive_mask')
+        if alive is not None:
+            alive = torch.as_tensor(alive, dtype=torch.double, device=device)
+            if alive.dim() == 1:
+                alive = alive.unsqueeze(0)
+            elif alive.dim() > 2:
+                alive = alive.view(batch_size, n)
+            if alive.dim() == 2 and alive.size(1) == n:
+                if alive.size(0) == 1 and batch_size > 1:
+                    alive = alive.expand(batch_size, -1)
+                if alive.size(0) == batch_size:
+                    alive = alive > 0.5
+                    valid = valid & alive[:, :, None] & alive[:, None, :]
+
+        if self.max_neighbors > 0 and n > 1:
+            k = int(max(1, min(self.max_neighbors, n - 1)))
+            masked_dist = dist.masked_fill(~valid, float('inf'))
+            nearest = torch.topk(masked_dist, k=k, dim=-1, largest=False).indices
+            keep = torch.zeros_like(valid)
+            keep.scatter_(dim=-1, index=nearest, value=True)
+            valid = valid & keep
+
+        return ~valid
 
     def _comm_malicious_mask(self, info, batch_size, n, device, dtype, sender_mask=None):
         mask = None
@@ -459,4 +518,3 @@ class TarCommNetMLP(nn.Module):
         # dim 0 = num of layers * num of direction
         return tuple(( torch.zeros(batch_size * self.nagents, self.hid_size, requires_grad=True),
                        torch.zeros(batch_size * self.nagents, self.hid_size, requires_grad=True)))
-

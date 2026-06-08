@@ -374,7 +374,7 @@ def main(args):
     parser = get_config()
     all_args = parse_args(args, parser)
 
-    if all_args.algorithm_name in ("rmappo", "rvita"):
+    if all_args.algorithm_name in ("rmappo", "rvita", "rtarmac"):
         print(f"u are choosing to use {all_args.algorithm_name}, we set use_recurrent_policy to be True")
         all_args.use_recurrent_policy = True
         all_args.use_naive_recurrent_policy = False
@@ -487,8 +487,8 @@ def main(args):
         "run_dir": run_dir
     }
 
-    if all_args.algorithm_name == "rvita" and not all_args.share_policy:
-        raise ValueError("rvita requires `share_policy=True` (shared runner) in this repository.")
+    if all_args.algorithm_name in ("rvita", "rtarmac") and not all_args.share_policy:
+        raise ValueError(f"{all_args.algorithm_name} requires `share_policy=True` (shared runner) in this repository.")
 
     # run experiments
     if all_args.share_policy:

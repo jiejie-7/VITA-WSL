@@ -126,6 +126,10 @@ parser.add_argument('--comm_malicious_mode', default='bernoulli', type=str,
                     help='malicious communication mode: bernoulli, fixed, or one')
 parser.add_argument('--comm_malicious_fixed_agent_id', default=0, type=int,
                     help='fixed malicious sender id when comm_malicious_mode=fixed')
+parser.add_argument('--comm_sight_range', default=0.0, type=float,
+                    help='communication range; <=0 keeps all alive senders')
+parser.add_argument('--max_neighbors', default=0, type=int,
+                    help='maximum communication senders per receiver; <=0 keeps all')
 
 # other
 parser.add_argument('--config', default='', type=str,

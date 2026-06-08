@@ -107,6 +107,9 @@ class Runner(object):
         elif self.algorithm_name == "rvita":
             from onpolicy.algorithms.r_vita.r_vita import R_VITA as TrainAlgo
             from onpolicy.algorithms.r_vita.algorithm.rVITAPolicy import R_VITAPolicy as Policy
+        elif self.algorithm_name == "rtarmac":
+            from onpolicy.algorithms.r_tarmac.r_tarmac import R_TARMAC as TrainAlgo
+            from onpolicy.algorithms.r_tarmac.algorithm.rTarMACPolicy import R_TarMACPolicy as Policy
         else:
             from onpolicy.algorithms.r_mappo.r_mappo import R_MAPPO as TrainAlgo
             from onpolicy.algorithms.r_mappo.algorithm.rMAPPOPolicy import R_MAPPOPolicy as Policy
@@ -133,7 +136,7 @@ class Runner(object):
             self.trainer = TrainAlgo(self.all_args, self.policy, device = self.device)
 
         # buffer
-        if self.algorithm_name == "rvita":
+        if self.algorithm_name in ("rvita", "rtarmac"):
             from onpolicy.utils.vita_buffer import SharedVITAReplayBuffer as Buffer
         else:
             Buffer = SharedReplayBuffer

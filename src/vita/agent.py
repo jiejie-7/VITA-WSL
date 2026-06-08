@@ -20,6 +20,8 @@ class VITAAgentConfig:
     trust_gamma: float = 1.0
     kl_beta: float = 1e-3
     kl_free_bits: float = 0.0
+    vib_consistency_weight: float = 0.0
+    vib_consistency_noise_std: float = 0.0
     trust_lambda: float = 0.1
     trust_malicious_weight: float = 1.0
     trust_margin_weight: float = 0.5
@@ -131,6 +133,39 @@ class VITAAgent(torch.nn.Module):
         feat, _ = self.comm_encoder(flat, None, None)
         feat = self.neighbor_norm(feat)
         return feat.view(bsz, k, -1)
+
+    def _vib_consistency_loss(
+        self,
+        neighbor_seq: torch.Tensor,
+        sender_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        zero = self._zero_scalar(neighbor_seq)
+        weight = float(max(0.0, getattr(self.cfg, "vib_consistency_weight", 0.0)))
+        noise_std = float(max(0.0, getattr(self.cfg, "vib_consistency_noise_std", 0.0)))
+        if (
+            weight <= 0.0
+            or noise_std <= 0.0
+            or (not self.cfg.enable_kl)
+            or bool(self.cfg.attention_only)
+            or neighbor_seq.numel() == 0
+        ):
+            return zero, zero
+
+        edge_mask = torch.nan_to_num(sender_mask.squeeze(-1), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        if not bool((edge_mask > 0.5).any()):
+            return zero, zero
+
+        noise_mask = edge_mask.view(edge_mask.size(0), edge_mask.size(1), 1, 1)
+        view1 = neighbor_seq + torch.randn_like(neighbor_seq) * noise_std * noise_mask
+        view2 = neighbor_seq + torch.randn_like(neighbor_seq) * noise_std * noise_mask
+        mu1 = self.vib_gat.encode_mean_latent(self._encode_neighbors(view1))
+        mu2 = self.vib_gat.encode_mean_latent(self._encode_neighbors(view2))
+        mu1 = F.normalize(mu1, p=2, dim=-1)
+        mu2 = F.normalize(mu2, p=2, dim=-1)
+        per_edge = (mu1 - mu2).pow(2).mean(dim=-1)
+        raw_loss = (per_edge * edge_mask).sum() / edge_mask.sum().clamp_min(1.0)
+        scaled_loss = raw_loss * weight * float(self.comm_strength)
+        return scaled_loss, raw_loss.detach()
 
     def _mask_logits(self, logits: torch.Tensor, avail_actions: torch.Tensor | None) -> torch.Tensor:
         logits = torch.nan_to_num(logits, nan=-1e9, posinf=1e9, neginf=-1e9)
@@ -473,6 +508,8 @@ class VITAAgent(torch.nn.Module):
                 "comm_feat": torch.zeros_like(self_feat),
                 "kl_loss": zero,
                 "kl_raw": zero,
+                "vib_consistency_loss": zero,
+                "vib_consistency_raw": zero,
                 "trust_loss": zero,
                 "trust_score_mean": zero,
                 "trust_score_p10": zero,
@@ -521,6 +558,11 @@ class VITAAgent(torch.nn.Module):
             sender_mask,
             deterministic=deterministic,
         )
+        if training:
+            vib_consistency_loss, vib_consistency_raw = self._vib_consistency_loss(neighbor_seq, sender_mask)
+        else:
+            vib_consistency_loss = self._zero_scalar(self_feat)
+            vib_consistency_raw = self._zero_scalar(self_feat)
         if channel_noise is None:
             recv_messages = sender_messages
         else:
@@ -658,6 +700,8 @@ class VITAAgent(torch.nn.Module):
             "comm_feat": comm_feat,
             "kl_loss": kl_loss,
             "kl_raw": kl_raw,
+            "vib_consistency_loss": vib_consistency_loss,
+            "vib_consistency_raw": vib_consistency_raw,
             "trust_loss": trust_loss,
             "trust_score_mean": trust_score_mean,
             "trust_score_p10": trust_score_p10,

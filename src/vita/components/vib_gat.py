@@ -100,6 +100,12 @@ class VIBGATLayer(nn.Module):
         uncertainty = torch.mean(torch.exp(logvar), dim=-1, keepdim=True)
         return messages, kl_scaled, kl_raw, uncertainty
 
+    def encode_mean_latent(self, neighbor_feat: torch.Tensor) -> torch.Tensor:
+        norm_neighbors = self.pre_norm(neighbor_feat)
+        if self.attention_only:
+            return self.post_norm(self.direct_latent(norm_neighbors))
+        return self.post_norm(self.to_mu(norm_neighbors))
+
     def decode_messages(self, messages: torch.Tensor) -> torch.Tensor:
         feat = self.message_decoder(messages)
         feat = self.message_norm(feat)

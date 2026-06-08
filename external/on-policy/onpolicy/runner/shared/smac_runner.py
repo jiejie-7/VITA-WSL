@@ -50,7 +50,7 @@ class SMACRunner(Runner):
         self._vita_comm_malicious_senders = None
         self._vita_latent_dim = 64
 
-        if self.algorithm_name == "rvita":
+        if self._uses_neighbor_comm():
             seed = int(getattr(self.all_args, "seed", 0))
             self._vita_comm_rng = np.random.RandomState(seed)
             self._vita_comm_noise_std = _env_float("ONPOLICY_COMM_NOISE_STD", 0.0)
@@ -60,6 +60,9 @@ class SMACRunner(Runner):
             self._vita_comm_malicious_mode = _env_str("ONPOLICY_COMM_MALICIOUS_MODE", "bernoulli").strip().lower()
             self._vita_comm_malicious_fixed_agent_id = _env_int("ONPOLICY_COMM_MALICIOUS_FIXED_AGENT_ID", 0)
             self._vita_latent_dim = int(getattr(self.all_args, "vita_latent_dim", 64) or 64)
+
+    def _uses_neighbor_comm(self) -> bool:
+        return self.algorithm_name in {"rvita", "rtarmac"}
 
     def _vita_sample_comm_malicious_senders(self, n_envs: int, n_agents: int):
         if self._vita_comm_rng is None:
@@ -184,14 +187,14 @@ class SMACRunner(Runner):
         last_battles_won = np.zeros(self.n_rollout_threads, dtype=np.float32)
 
         for episode in range(episodes):
-            if self.algorithm_name == "rvita" and hasattr(self.trainer, "set_update"):
+            if self._uses_neighbor_comm() and hasattr(self.trainer, "set_update"):
                 self.trainer.set_update(episode + 1)
             if self.use_linear_lr_decay:
                 self.trainer.policy.lr_decay(episode, episodes)
 
             for step in range(self.episode_length):
                 # Sample actions
-                if self.algorithm_name == "rvita":
+                if self._uses_neighbor_comm():
                     values, actions, action_log_probs, rnn_states, rnn_states_critic, neighbor_obs, neighbor_masks, neighbor_idx, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise = self.collect(step)
                 else:
                     values, actions, action_log_probs, rnn_states, rnn_states_critic = self.collect(step)
@@ -202,7 +205,7 @@ class SMACRunner(Runner):
                 # Obser reward and next obs
                 obs, share_obs, rewards, dones, infos, available_actions = self.envs.step(actions)
 
-                if self.algorithm_name == "rvita":
+                if self._uses_neighbor_comm():
                     neighbor_actions = self._vita_gather_neighbor_actions(actions, neighbor_idx)
                     data = obs, share_obs, rewards, dones, infos, available_actions, \
                         values, actions, action_log_probs, \
@@ -281,6 +284,9 @@ class SMACRunner(Runner):
                         "residual_gate_mean",
                         "residual_gate_max",
                         "residual_comm_ratio",
+                        "comm_env_neighbors",
+                        "comm_effective_neighbors",
+                        "comm_attention_entropy",
                     }
                 },
             }
@@ -334,7 +340,7 @@ class SMACRunner(Runner):
         self.buffer.obs[0] = obs.copy()
         self.buffer.available_actions[0] = available_actions.copy()
 
-        if self.algorithm_name == "rvita":
+        if self._uses_neighbor_comm():
             self._vita_positions = np.zeros((self.n_rollout_threads, self.num_agents, 2), dtype=np.float32)
             self._vita_alive = np.ones((self.n_rollout_threads, self.num_agents), dtype=np.float32)
             self._vita_comm_malicious_senders = self._vita_sample_comm_malicious_senders(
@@ -344,7 +350,7 @@ class SMACRunner(Runner):
     @torch.no_grad()
     def collect(self, step):
         self.trainer.prep_rollout()
-        if self.algorithm_name == "rvita":
+        if self._uses_neighbor_comm():
             obs_now = self.buffer.obs[step]
             neighbor_obs, neighbor_masks, neighbor_idx, neighbor_malicious = self._vita_compute_neighbors(obs_now)
             neighbor_channel_masks, neighbor_channel_noise = self._vita_sample_channel_effects(neighbor_masks, neighbor_malicious)
@@ -375,7 +381,7 @@ class SMACRunner(Runner):
         rnn_states = np.array(np.split(_t2n(rnn_state), self.n_rollout_threads))
         rnn_states_critic = np.array(np.split(_t2n(rnn_state_critic), self.n_rollout_threads))
 
-        if self.algorithm_name == "rvita":
+        if self._uses_neighbor_comm():
             return (
                 values,
                 actions,
@@ -393,7 +399,7 @@ class SMACRunner(Runner):
         return values, actions, action_log_probs, rnn_states, rnn_states_critic
 
     def insert(self, data):
-        if self.algorithm_name == "rvita":
+        if self._uses_neighbor_comm():
             obs, share_obs, rewards, dones, infos, available_actions, \
                 values, actions, action_log_probs, rnn_states, rnn_states_critic, neighbor_obs, neighbor_masks, neighbor_actions, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise = data
         else:
@@ -417,7 +423,7 @@ class SMACRunner(Runner):
         if not self.use_centralized_V:
             share_obs = obs
 
-        if self.algorithm_name == "rvita":
+        if self._uses_neighbor_comm():
             self.buffer.insert(
                 share_obs,
                 obs,
@@ -604,7 +610,7 @@ class SMACRunner(Runner):
         eval_alive = None
         eval_prev_actions = None
         eval_comm_malicious_senders = None
-        if self.algorithm_name == "rvita":
+        if self._uses_neighbor_comm():
             eval_positions = np.zeros((self.n_eval_rollout_threads, self.num_agents, 2), dtype=np.float32)
             eval_alive = np.ones((self.n_eval_rollout_threads, self.num_agents), dtype=np.float32)
             eval_comm_malicious_senders = self._vita_sample_comm_malicious_senders(
@@ -622,7 +628,7 @@ class SMACRunner(Runner):
                                             np.concatenate(eval_available_actions),
                                             deterministic=True)
             else:
-                if self.algorithm_name == "rvita":
+                if self._uses_neighbor_comm():
                     neighbor_obs, neighbor_masks, neighbor_idx, neighbor_malicious = self._vita_compute_neighbors(
                         eval_obs, positions=eval_positions, alive=eval_alive, comm_malicious_senders=eval_comm_malicious_senders
                     )
@@ -660,7 +666,7 @@ class SMACRunner(Runner):
             one_episode_rewards.append(eval_rewards)
 
             eval_dones_env = np.all(eval_dones, axis=1)
-            if self.algorithm_name == "rvita":
+            if self._uses_neighbor_comm():
                 self._vita_update_meta(eval_infos, dones_env=eval_dones_env, positions=eval_positions, alive=eval_alive)
                 idx = np.asarray(eval_dones_env, dtype=bool)
                 if idx.any():
