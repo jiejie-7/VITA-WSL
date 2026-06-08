@@ -51,6 +51,9 @@ summary.json
 
 # Nested external repos
 /CommFormer/
+/MAIC/
+/TGCNet/
+/external/on-policy.backup/
 
 # StarCraft / temp
 sc2.log
