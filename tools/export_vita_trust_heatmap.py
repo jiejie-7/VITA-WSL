@@ -174,6 +174,10 @@ def main() -> None:
     runner = SMACRunner(config)
     runner.model_dir = str(model_dir)
     runner.restore(model_dir)
+    final_update = int((cfg.get("train") or {}).get("updates", 0))
+    if hasattr(runner.trainer.policy, "update_schedules"):
+        runner.trainer.policy.update_schedules(final_update)
+    runner.trainer.policy.enable_act_debug = True
     runner.trainer.prep_rollout()
 
     obs, share_obs, available_actions = envs.reset()
@@ -218,6 +222,12 @@ def main() -> None:
             deterministic=True,
         )
         debug = getattr(runner.trainer.policy, "last_act_debug", {}) or {}
+        missing = [key for key in ("edge_reliability", "edge_allocation", "edge_valid_mask") if key not in debug]
+        if missing:
+            raise RuntimeError(
+                "VITA edge debug was not exported by policy.act(); missing keys: "
+                + ", ".join(missing)
+            )
         edge_rel = np.asarray(debug.get("edge_reliability"), dtype=np.float32).reshape(1, num_agents, -1, 1)
         edge_alloc = np.asarray(debug.get("edge_allocation"), dtype=np.float32).reshape(1, num_agents, -1, 1)
         edge_valid = np.asarray(debug.get("edge_valid_mask"), dtype=np.float32).reshape(1, num_agents, -1, 1)

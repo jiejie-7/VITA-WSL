@@ -175,6 +175,8 @@ class R_VITAPolicy:
         self._neighbor_malicious: Optional[np.ndarray] = None
         self._neighbor_channel_masks: Optional[np.ndarray] = None
         self._neighbor_channel_noise: Optional[np.ndarray] = None
+        self.enable_act_debug = False
+        self.last_act_debug: dict[str, np.ndarray] = {}
 
         self._vita_comm_delay = int(getattr(args, "vita_comm_delay_updates", 0))
         self._vita_comm_warmup = int(getattr(args, "vita_comm_warmup_updates", 0))
@@ -617,6 +619,7 @@ class R_VITAPolicy:
         dummy_state = torch.zeros(obs.size(0), self.state_dim, device=self.device, dtype=torch.float32)
         dummy_critic = torch.zeros_like(rnn_states_actor)
 
+        collect_debug = bool(getattr(self, "enable_act_debug", False))
         out = self.agent.act(
             obs_seq,
             dummy_state,
@@ -631,5 +634,15 @@ class R_VITAPolicy:
             masks,
             available_actions,
             deterministic=deterministic,
+            return_debug=collect_debug,
         )
+        if collect_debug:
+            debug = {}
+            for key in ("edge_reliability", "edge_allocation", "edge_valid_mask"):
+                value = out.get(key)
+                if value is not None:
+                    debug[key] = value.detach().cpu().numpy()
+            self.last_act_debug = debug
+        else:
+            self.last_act_debug = {}
         return out["actions"], out["next_actor_state"].unsqueeze(1)
