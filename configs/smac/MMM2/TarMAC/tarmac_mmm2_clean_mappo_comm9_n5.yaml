@@ -25,7 +25,7 @@ model:
   hidden_dim: 128
   message_dim: 128
   attn_dim: 16
-  comm_passes: 2
+  comm_passes: 1
   comm_dropout: 0.0
   comm_sight_range: 9
   max_neighbors: 5
@@ -46,6 +46,7 @@ train:
   value_loss_coef: 1.0
   use_value_active_masks: false
   max_grad_norm: 10.0
+  recurrent_N: 2
   data_chunk_length: 10
   eval_interval_updates: 25
   eval_episodes: 32
@@ -58,4 +59,3 @@ onpolicy:
   use_wandb: false
   share_policy: true
   use_centralized_V: true
-

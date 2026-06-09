@@ -34,6 +34,7 @@ class R_TarMACPolicy:
         )
 
         self._neighbor_obs = None
+        self._neighbor_rnn_states = None
         self._neighbor_masks = None
         self._neighbor_channel_masks = None
         self._neighbor_channel_noise = None
@@ -50,8 +51,10 @@ class R_TarMACPolicy:
         neighbor_malicious=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
+        neighbor_rnn_states=None,
     ):
         self._neighbor_obs = neighbor_obs
+        self._neighbor_rnn_states = neighbor_rnn_states
         self._neighbor_masks = neighbor_masks
         self._neighbor_channel_masks = neighbor_channel_masks
         self._neighbor_channel_noise = neighbor_channel_noise
@@ -76,6 +79,7 @@ class R_TarMACPolicy:
             available_actions,
             deterministic,
             neighbor_obs=self._neighbor_obs,
+            neighbor_rnn_states=self._neighbor_rnn_states,
             neighbor_masks=self._neighbor_masks,
             neighbor_channel_masks=self._neighbor_channel_masks,
             neighbor_channel_noise=self._neighbor_channel_noise,
@@ -94,6 +98,7 @@ class R_TarMACPolicy:
         rnn_states_actor,
         rnn_states_critic,
         neighbor_obs,
+        neighbor_rnn_states,
         neighbor_masks,
         neighbor_channel_masks,
         neighbor_channel_noise,
@@ -110,6 +115,7 @@ class R_TarMACPolicy:
             available_actions,
             active_masks,
             neighbor_obs=neighbor_obs,
+            neighbor_rnn_states=neighbor_rnn_states,
             neighbor_masks=neighbor_masks,
             neighbor_channel_masks=neighbor_channel_masks,
             neighbor_channel_noise=neighbor_channel_noise,
@@ -142,12 +148,16 @@ class R_TarMACPolicy:
         neighbor_channel_noise = None
         if self._neighbor_channel_noise is not None:
             neighbor_channel_noise = check(self._neighbor_channel_noise).to(device=self.device, dtype=torch.float32)
+        neighbor_rnn_states = None
+        if self._neighbor_rnn_states is not None:
+            neighbor_rnn_states = check(self._neighbor_rnn_states).to(device=self.device, dtype=torch.float32)
         values, action_log_probs, dist_entropy, _ = self.evaluate_actions_tarmac(
             cent_obs,
             obs,
             rnn_states_actor,
             rnn_states_critic,
             neighbor_obs,
+            neighbor_rnn_states,
             neighbor_masks,
             neighbor_channel_masks,
             neighbor_channel_noise,
@@ -169,6 +179,7 @@ class R_TarMACPolicy:
             available_actions,
             deterministic,
             neighbor_obs=self._neighbor_obs,
+            neighbor_rnn_states=self._neighbor_rnn_states,
             neighbor_masks=self._neighbor_masks,
             neighbor_channel_masks=self._neighbor_channel_masks,
             neighbor_channel_noise=self._neighbor_channel_noise,

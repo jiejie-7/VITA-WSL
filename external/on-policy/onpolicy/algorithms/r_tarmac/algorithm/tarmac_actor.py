@@ -14,8 +14,8 @@ class TarMACActor(nn.Module):
 
     This ports the TarCommNetMLP communication block into the on-policy actor:
     encoder -> state2query/key/value -> soft attention -> C_modules -> recurrent
-    hidden update. The MAPPO runner stores one recurrent state, so the LSTM cell
-    state is reconstructed from the stored hidden state at sequence boundaries.
+    hidden update. For recurrent TarMAC configs, set recurrent_N=2 so the actor
+    can carry the LSTM hidden and cell states through the MAPPO buffer.
     """
 
     def __init__(self, args, obs_space, action_space, device=torch.device("cpu")):
@@ -66,6 +66,7 @@ class TarMACActor(nn.Module):
         self,
         neighbor_obs,
         neighbor_masks,
+        neighbor_rnn_states=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
     ):
@@ -78,8 +79,17 @@ class TarMACActor(nn.Module):
             neighbor_masks = neighbor_masks.unsqueeze(-1)
 
         batch_size, max_neighbors = neighbor_obs.shape[:2]
-        flat_neighbor_obs = neighbor_obs.reshape(batch_size * max_neighbors, -1)
-        comm = self._encode_obs(flat_neighbor_obs).view(batch_size, max_neighbors, self.hidden_size)
+        if self.use_recurrent and neighbor_rnn_states is not None:
+            neighbor_rnn_states = check(neighbor_rnn_states).to(**self.tpdv)
+            if neighbor_rnn_states.dim() == 4:
+                comm = neighbor_rnn_states[:, :, 0, :]
+            elif neighbor_rnn_states.dim() == 3:
+                comm = neighbor_rnn_states
+            else:
+                raise ValueError("neighbor_rnn_states must have shape [B, K, H] or [B, K, R, H].")
+        else:
+            flat_neighbor_obs = neighbor_obs.reshape(batch_size * max_neighbors, -1)
+            comm = self._encode_obs(flat_neighbor_obs).view(batch_size, max_neighbors, self.hidden_size)
 
         effective_masks = neighbor_masks
         if neighbor_channel_masks is not None:
@@ -111,12 +121,14 @@ class TarMACActor(nn.Module):
         cell_state,
         neighbor_obs,
         neighbor_masks,
+        neighbor_rnn_states=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
     ):
         neighbor_comm, env_masks, effective_masks = self._prepare_neighbor_comm(
             neighbor_obs,
             neighbor_masks,
+            neighbor_rnn_states,
             neighbor_channel_masks,
             neighbor_channel_noise,
         )
@@ -165,6 +177,7 @@ class TarMACActor(nn.Module):
         masks,
         neighbor_obs,
         neighbor_masks,
+        neighbor_rnn_states=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
     ):
@@ -172,14 +185,12 @@ class TarMACActor(nn.Module):
         if self.use_recurrent:
             if rnn_states.dim() == 3:
                 hidden_state = rnn_states[:, 0]
+                cell_state = rnn_states[:, 1] if rnn_states.size(1) > 1 else hidden_state
             else:
                 hidden_state = rnn_states
+                cell_state = hidden_state
             hidden_state = hidden_state * masks
-            # The on-policy buffer stores one actor recurrent state. MAGIC's
-            # LSTMCell also has a cell state; using the stored hidden as the
-            # boundary cell keeps the update deterministic without changing the
-            # shared buffer layout.
-            cell_state = hidden_state
+            cell_state = cell_state * masks
         else:
             hidden_state = encoded_obs
             cell_state = encoded_obs
@@ -190,10 +201,17 @@ class TarMACActor(nn.Module):
             cell_state,
             neighbor_obs,
             neighbor_masks,
+            neighbor_rnn_states,
             neighbor_channel_masks,
             neighbor_channel_noise,
         )
-        next_rnn_states = features.unsqueeze(1) if self.use_recurrent else rnn_states
+        if self.use_recurrent:
+            if rnn_states.dim() == 3 and rnn_states.size(1) > 1:
+                next_rnn_states = torch.stack((features, cell_state), dim=1)
+            else:
+                next_rnn_states = features.unsqueeze(1)
+        else:
+            next_rnn_states = rnn_states
         return features, next_rnn_states, debug
 
     def _sequence_features(
@@ -203,6 +221,7 @@ class TarMACActor(nn.Module):
         masks,
         neighbor_obs,
         neighbor_masks,
+        neighbor_rnn_states=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
     ):
@@ -226,9 +245,17 @@ class TarMACActor(nn.Module):
                 neighbor_channel_noise.size(1),
                 neighbor_channel_noise.size(2),
             )
+        if neighbor_rnn_states is not None:
+            neighbor_rnn_states = neighbor_rnn_states.view(
+                t_steps,
+                n_batch,
+                neighbor_rnn_states.size(1),
+                neighbor_rnn_states.size(2),
+                neighbor_rnn_states.size(3),
+            )
 
         hidden_state = rnn_states[:, 0] if rnn_states.dim() == 3 else rnn_states
-        cell_state = hidden_state
+        cell_state = rnn_states[:, 1] if rnn_states.dim() == 3 and rnn_states.size(1) > 1 else hidden_state
         features = []
         debug_accum = {
             "comm_env_neighbors": [],
@@ -246,6 +273,7 @@ class TarMACActor(nn.Module):
                 cell_state,
                 neighbor_obs[t],
                 neighbor_masks[t],
+                None if neighbor_rnn_states is None else neighbor_rnn_states[t],
                 None if neighbor_channel_masks is None else neighbor_channel_masks[t],
                 None if neighbor_channel_noise is None else neighbor_channel_noise[t],
             )
@@ -254,7 +282,10 @@ class TarMACActor(nn.Module):
                 debug_accum[key].append(debug[key])
 
         out_features = torch.stack(features, dim=0).reshape(t_steps * n_batch, -1)
-        next_rnn_states = hidden_state.unsqueeze(1)
+        if rnn_states.dim() == 3 and rnn_states.size(1) > 1:
+            next_rnn_states = torch.stack((hidden_state, cell_state), dim=1)
+        else:
+            next_rnn_states = hidden_state.unsqueeze(1)
         debug = {key: torch.stack(values).mean() for key, values in debug_accum.items()}
         return out_features, next_rnn_states, debug
 
@@ -265,6 +296,7 @@ class TarMACActor(nn.Module):
         masks,
         neighbor_obs,
         neighbor_masks,
+        neighbor_rnn_states=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
     ):
@@ -272,6 +304,8 @@ class TarMACActor(nn.Module):
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
         neighbor_obs = check(neighbor_obs).to(**self.tpdv)
+        if neighbor_rnn_states is not None:
+            neighbor_rnn_states = check(neighbor_rnn_states).to(**self.tpdv)
         neighbor_masks = check(neighbor_masks).to(**self.tpdv)
         if neighbor_channel_masks is not None:
             neighbor_channel_masks = check(neighbor_channel_masks).to(**self.tpdv)
@@ -285,6 +319,7 @@ class TarMACActor(nn.Module):
                 masks,
                 neighbor_obs,
                 neighbor_masks,
+                neighbor_rnn_states,
                 neighbor_channel_masks,
                 neighbor_channel_noise,
             )
@@ -294,6 +329,7 @@ class TarMACActor(nn.Module):
             masks,
             neighbor_obs,
             neighbor_masks,
+            neighbor_rnn_states,
             neighbor_channel_masks,
             neighbor_channel_noise,
         )
@@ -313,6 +349,7 @@ class TarMACActor(nn.Module):
         available_actions=None,
         deterministic=False,
         neighbor_obs=None,
+        neighbor_rnn_states=None,
         neighbor_masks=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
@@ -323,6 +360,7 @@ class TarMACActor(nn.Module):
             masks,
             neighbor_obs,
             neighbor_masks,
+            neighbor_rnn_states,
             neighbor_channel_masks,
             neighbor_channel_noise,
         )
@@ -340,6 +378,7 @@ class TarMACActor(nn.Module):
         available_actions=None,
         active_masks=None,
         neighbor_obs=None,
+        neighbor_rnn_states=None,
         neighbor_masks=None,
         neighbor_channel_masks=None,
         neighbor_channel_noise=None,
@@ -350,6 +389,7 @@ class TarMACActor(nn.Module):
             masks,
             neighbor_obs,
             neighbor_masks,
+            neighbor_rnn_states,
             neighbor_channel_masks,
             neighbor_channel_noise,
         )

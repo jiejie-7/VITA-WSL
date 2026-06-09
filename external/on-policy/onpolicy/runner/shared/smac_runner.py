@@ -195,7 +195,7 @@ class SMACRunner(Runner):
             for step in range(self.episode_length):
                 # Sample actions
                 if self._uses_neighbor_comm():
-                    values, actions, action_log_probs, rnn_states, rnn_states_critic, neighbor_obs, neighbor_masks, neighbor_idx, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise = self.collect(step)
+                    values, actions, action_log_probs, rnn_states, rnn_states_critic, neighbor_obs, neighbor_rnn_states, neighbor_masks, neighbor_idx, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise = self.collect(step)
                 else:
                     values, actions, action_log_probs, rnn_states, rnn_states_critic = self.collect(step)
 
@@ -209,7 +209,7 @@ class SMACRunner(Runner):
                     neighbor_actions = self._vita_gather_neighbor_actions(actions, neighbor_idx)
                     data = obs, share_obs, rewards, dones, infos, available_actions, \
                         values, actions, action_log_probs, \
-                        rnn_states, rnn_states_critic, neighbor_obs, neighbor_masks, neighbor_actions, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise
+                        rnn_states, rnn_states_critic, neighbor_obs, neighbor_rnn_states, neighbor_masks, neighbor_actions, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise
                 else:
                     data = obs, share_obs, rewards, dones, infos, available_actions, \
                            values, actions, action_log_probs, \
@@ -353,12 +353,21 @@ class SMACRunner(Runner):
         if self._uses_neighbor_comm():
             obs_now = self.buffer.obs[step]
             neighbor_obs, neighbor_masks, neighbor_idx, neighbor_malicious = self._vita_compute_neighbors(obs_now)
+            neighbor_rnn_states = self._vita_gather_neighbor_rnn_states(self.buffer.rnn_states[step], neighbor_idx)
             neighbor_channel_masks, neighbor_channel_noise = self._vita_sample_channel_effects(neighbor_masks, neighbor_malicious)
             act_dim = int(self.envs.action_space[0].n)
             neighbor_action_labels = np.zeros(
                 (neighbor_obs.shape[0], neighbor_obs.shape[1], neighbor_obs.shape[2], act_dim),
                 dtype=np.float32,
             )
+            step_context_kwargs = {}
+            if self.algorithm_name == "rtarmac":
+                step_context_kwargs["neighbor_rnn_states"] = neighbor_rnn_states.reshape(
+                    -1,
+                    neighbor_rnn_states.shape[2],
+                    neighbor_rnn_states.shape[3],
+                    neighbor_rnn_states.shape[4],
+                )
             self.trainer.policy.set_step_context(
                 neighbor_obs.reshape(-1, neighbor_obs.shape[2], neighbor_obs.shape[3]),
                 neighbor_masks.reshape(-1, neighbor_masks.shape[2], 1),
@@ -366,6 +375,7 @@ class SMACRunner(Runner):
                 neighbor_malicious.reshape(-1, neighbor_malicious.shape[2], 1),
                 neighbor_channel_masks.reshape(-1, neighbor_channel_masks.shape[2], 1),
                 neighbor_channel_noise.reshape(-1, neighbor_channel_noise.shape[2], neighbor_channel_noise.shape[3]),
+                **step_context_kwargs,
             )
         value, action, action_log_prob, rnn_state, rnn_state_critic \
             = self.trainer.policy.get_actions(np.concatenate(self.buffer.share_obs[step]),
@@ -389,6 +399,7 @@ class SMACRunner(Runner):
                 rnn_states,
                 rnn_states_critic,
                 neighbor_obs,
+                neighbor_rnn_states,
                 neighbor_masks,
                 neighbor_idx,
                 neighbor_malicious,
@@ -401,7 +412,7 @@ class SMACRunner(Runner):
     def insert(self, data):
         if self._uses_neighbor_comm():
             obs, share_obs, rewards, dones, infos, available_actions, \
-                values, actions, action_log_probs, rnn_states, rnn_states_critic, neighbor_obs, neighbor_masks, neighbor_actions, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise = data
+                values, actions, action_log_probs, rnn_states, rnn_states_critic, neighbor_obs, neighbor_rnn_states, neighbor_masks, neighbor_actions, neighbor_malicious, neighbor_channel_masks, neighbor_channel_noise = data
         else:
             obs, share_obs, rewards, dones, infos, available_actions, \
                 values, actions, action_log_probs, rnn_states, rnn_states_critic = data
@@ -438,6 +449,7 @@ class SMACRunner(Runner):
                 active_masks,
                 available_actions,
                 neighbor_obs=neighbor_obs,
+                neighbor_rnn_states=neighbor_rnn_states,
                 neighbor_actions=neighbor_actions,
                 neighbor_masks=neighbor_masks,
                 neighbor_malicious=neighbor_malicious,
@@ -548,6 +560,11 @@ class SMACRunner(Runner):
         env_ids = np.arange(one_hot.shape[0])[:, None, None]
         return one_hot[env_ids, neighbor_idx]
 
+    def _vita_gather_neighbor_rnn_states(self, rnn_states, neighbor_idx):
+        rnn_states = np.asarray(rnn_states, dtype=np.float32)
+        env_ids = np.arange(rnn_states.shape[0])[:, None, None]
+        return rnn_states[env_ids, neighbor_idx]
+
     def _vita_update_meta(self, infos, *, dones_env=None, positions=None, alive=None) -> None:
         positions = self._vita_positions if positions is None else positions
         alive = self._vita_alive if alive is None else alive
@@ -632,6 +649,7 @@ class SMACRunner(Runner):
                     neighbor_obs, neighbor_masks, neighbor_idx, neighbor_malicious = self._vita_compute_neighbors(
                         eval_obs, positions=eval_positions, alive=eval_alive, comm_malicious_senders=eval_comm_malicious_senders
                     )
+                    neighbor_rnn_states = self._vita_gather_neighbor_rnn_states(eval_rnn_states, neighbor_idx)
                     neighbor_channel_masks, neighbor_channel_noise = self._vita_sample_channel_effects(neighbor_masks, neighbor_malicious)
                     act_dim = int(self.eval_envs.action_space[0].n)
                     if eval_prev_actions is not None:
@@ -641,6 +659,14 @@ class SMACRunner(Runner):
                             (neighbor_obs.shape[0], neighbor_obs.shape[1], neighbor_obs.shape[2], act_dim),
                             dtype=np.float32,
                         )
+                    step_context_kwargs = {}
+                    if self.algorithm_name == "rtarmac":
+                        step_context_kwargs["neighbor_rnn_states"] = neighbor_rnn_states.reshape(
+                            -1,
+                            neighbor_rnn_states.shape[2],
+                            neighbor_rnn_states.shape[3],
+                            neighbor_rnn_states.shape[4],
+                        )
                     self.trainer.policy.set_step_context(
                         neighbor_obs.reshape(-1, neighbor_obs.shape[2], neighbor_obs.shape[3]),
                         neighbor_masks.reshape(-1, neighbor_masks.shape[2], 1),
@@ -648,6 +674,7 @@ class SMACRunner(Runner):
                         neighbor_malicious.reshape(-1, neighbor_malicious.shape[2], 1),
                         neighbor_channel_masks.reshape(-1, neighbor_channel_masks.shape[2], 1),
                         neighbor_channel_noise.reshape(-1, neighbor_channel_noise.shape[2], neighbor_channel_noise.shape[3]),
+                        **step_context_kwargs,
                     )
                 eval_actions, eval_rnn_states = \
                     self.trainer.policy.act(np.concatenate(eval_obs),

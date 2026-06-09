@@ -16,6 +16,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
         else:
             max_neighbors = 1
         self.vita_max_neighbors = max_neighbors
+        self._include_neighbor_rnn_states = str(getattr(args, "algorithm_name", "")).lower() == "rtarmac"
 
         obs_dim = int(self.obs.shape[-1])
         if act_space.__class__.__name__ != "Discrete":
@@ -25,6 +26,17 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
 
         self.neighbor_obs = np.zeros(
             (self.episode_length, self.n_rollout_threads, num_agents, self.vita_max_neighbors, obs_dim),
+            dtype=np.float32,
+        )
+        self.neighbor_rnn_states = np.zeros(
+            (
+                self.episode_length,
+                self.n_rollout_threads,
+                num_agents,
+                self.vita_max_neighbors,
+                self.recurrent_N,
+                self.hidden_size,
+            ),
             dtype=np.float32,
         )
         self.neighbor_masks = np.zeros(
@@ -65,6 +77,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
         available_actions=None,
         *,
         neighbor_obs,
+        neighbor_rnn_states=None,
         neighbor_actions,
         neighbor_masks,
         neighbor_malicious,
@@ -88,6 +101,10 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
         )
 
         self.neighbor_obs[step] = neighbor_obs.copy()
+        if neighbor_rnn_states is not None:
+            self.neighbor_rnn_states[step] = neighbor_rnn_states.copy()
+        else:
+            self.neighbor_rnn_states[step] = 0.0
         self.neighbor_actions[step] = neighbor_actions.copy()
         self.neighbor_masks[step] = neighbor_masks.copy()
         self.neighbor_malicious[step] = neighbor_malicious.copy()
@@ -118,6 +135,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
         share_obs = self.share_obs[:-1].reshape(-1, *self.share_obs.shape[3:])
         obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
         neighbor_obs = self.neighbor_obs.reshape(-1, *self.neighbor_obs.shape[3:])
+        neighbor_rnn_states = self.neighbor_rnn_states.reshape(-1, *self.neighbor_rnn_states.shape[3:])
         neighbor_actions = self.neighbor_actions.reshape(-1, *self.neighbor_actions.shape[3:])
         neighbor_masks = self.neighbor_masks.reshape(-1, *self.neighbor_masks.shape[3:])
         neighbor_malicious = self.neighbor_malicious.reshape(-1, *self.neighbor_malicious.shape[3:])
@@ -139,6 +157,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             share_obs_batch = share_obs[indices]
             obs_batch = obs[indices]
             neighbor_obs_batch = neighbor_obs[indices]
+            neighbor_rnn_states_batch = neighbor_rnn_states[indices]
             neighbor_actions_batch = neighbor_actions[indices]
             neighbor_masks_batch = neighbor_masks[indices]
             neighbor_malicious_batch = neighbor_malicious[indices]
@@ -161,7 +180,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             else:
                 adv_targ = advantages[indices]
 
-            yield (
+            sample = (
                 share_obs_batch,
                 obs_batch,
                 neighbor_obs_batch,
@@ -181,6 +200,29 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
                 adv_targ,
                 available_actions_batch,
             )
+            if self._include_neighbor_rnn_states:
+                sample = (
+                    share_obs_batch,
+                    obs_batch,
+                    neighbor_obs_batch,
+                    neighbor_rnn_states_batch,
+                    neighbor_actions_batch,
+                    neighbor_masks_batch,
+                    neighbor_channel_masks_batch,
+                    neighbor_channel_noise_batch,
+                    neighbor_malicious_batch,
+                    rnn_states_batch,
+                    rnn_states_critic_batch,
+                    actions_batch,
+                    value_preds_batch,
+                    return_batch,
+                    masks_batch,
+                    active_masks_batch,
+                    old_action_log_probs_batch,
+                    adv_targ,
+                    available_actions_batch,
+                )
+            yield sample
 
     def naive_recurrent_generator(self, advantages, num_mini_batch):
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
@@ -196,6 +238,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
         share_obs = self.share_obs.reshape(-1, batch_size, *self.share_obs.shape[3:])
         obs = self.obs.reshape(-1, batch_size, *self.obs.shape[3:])
         neighbor_obs = self.neighbor_obs.reshape(-1, batch_size, *self.neighbor_obs.shape[3:])
+        neighbor_rnn_states = self.neighbor_rnn_states.reshape(-1, batch_size, *self.neighbor_rnn_states.shape[3:])
         neighbor_actions = self.neighbor_actions.reshape(-1, batch_size, *self.neighbor_actions.shape[3:])
         neighbor_masks = self.neighbor_masks.reshape(-1, batch_size, *self.neighbor_masks.shape[3:])
         neighbor_malicious = self.neighbor_malicious.reshape(-1, batch_size, *self.neighbor_malicious.shape[3:])
@@ -217,6 +260,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             share_obs_batch = []
             obs_batch = []
             neighbor_obs_batch = []
+            neighbor_rnn_states_batch = []
             neighbor_actions_batch = []
             neighbor_masks_batch = []
             neighbor_malicious_batch = []
@@ -238,6 +282,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
                 share_obs_batch.append(share_obs[:-1, ind])
                 obs_batch.append(obs[:-1, ind])
                 neighbor_obs_batch.append(neighbor_obs[:, ind])
+                neighbor_rnn_states_batch.append(neighbor_rnn_states[:, ind])
                 neighbor_actions_batch.append(neighbor_actions[:, ind])
                 neighbor_masks_batch.append(neighbor_masks[:, ind])
                 neighbor_malicious_batch.append(neighbor_malicious[:, ind])
@@ -259,6 +304,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             share_obs_batch = np.stack(share_obs_batch, 1)
             obs_batch = np.stack(obs_batch, 1)
             neighbor_obs_batch = np.stack(neighbor_obs_batch, 1)
+            neighbor_rnn_states_batch = np.stack(neighbor_rnn_states_batch, 1)
             neighbor_actions_batch = np.stack(neighbor_actions_batch, 1)
             neighbor_masks_batch = np.stack(neighbor_masks_batch, 1)
             neighbor_malicious_batch = np.stack(neighbor_malicious_batch, 1)
@@ -280,6 +326,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             share_obs_batch = _flatten(T, N, share_obs_batch)
             obs_batch = _flatten(T, N, obs_batch)
             neighbor_obs_batch = _flatten(T, N, neighbor_obs_batch)
+            neighbor_rnn_states_batch = _flatten(T, N, neighbor_rnn_states_batch)
             neighbor_actions_batch = _flatten(T, N, neighbor_actions_batch)
             neighbor_masks_batch = _flatten(T, N, neighbor_masks_batch)
             neighbor_malicious_batch = _flatten(T, N, neighbor_malicious_batch)
@@ -297,7 +344,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             old_action_log_probs_batch = _flatten(T, N, old_action_log_probs_batch)
             adv_targ = _flatten(T, N, adv_targ)
 
-            yield (
+            sample = (
                 share_obs_batch,
                 obs_batch,
                 neighbor_obs_batch,
@@ -317,6 +364,29 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
                 adv_targ,
                 available_actions_batch,
             )
+            if self._include_neighbor_rnn_states:
+                sample = (
+                    share_obs_batch,
+                    obs_batch,
+                    neighbor_obs_batch,
+                    neighbor_rnn_states_batch,
+                    neighbor_actions_batch,
+                    neighbor_masks_batch,
+                    neighbor_channel_masks_batch,
+                    neighbor_channel_noise_batch,
+                    neighbor_malicious_batch,
+                    rnn_states_batch,
+                    rnn_states_critic_batch,
+                    actions_batch,
+                    value_preds_batch,
+                    return_batch,
+                    masks_batch,
+                    active_masks_batch,
+                    old_action_log_probs_batch,
+                    adv_targ,
+                    available_actions_batch,
+                )
+            yield sample
 
     def recurrent_generator(self, advantages, num_mini_batch, data_chunk_length):
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
@@ -335,6 +405,9 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             obs = _cast(self.obs[:-1])
 
         neighbor_obs = self.neighbor_obs.transpose(1, 2, 0, 3, 4).reshape(-1, *self.neighbor_obs.shape[3:])
+        neighbor_rnn_states = self.neighbor_rnn_states.transpose(1, 2, 0, 3, 4, 5).reshape(
+            -1, *self.neighbor_rnn_states.shape[3:]
+        )
         neighbor_actions = self.neighbor_actions.transpose(1, 2, 0, 3, 4).reshape(-1, *self.neighbor_actions.shape[3:])
         neighbor_masks = self.neighbor_masks.transpose(1, 2, 0, 3, 4).reshape(-1, *self.neighbor_masks.shape[3:])
         neighbor_malicious = self.neighbor_malicious.transpose(1, 2, 0, 3, 4).reshape(-1, *self.neighbor_malicious.shape[3:])
@@ -360,6 +433,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             share_obs_batch = []
             obs_batch = []
             neighbor_obs_batch = []
+            neighbor_rnn_states_batch = []
             neighbor_actions_batch = []
             neighbor_masks_batch = []
             neighbor_malicious_batch = []
@@ -381,6 +455,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
                 share_obs_batch.append(share_obs[ind : ind + data_chunk_length])
                 obs_batch.append(obs[ind : ind + data_chunk_length])
                 neighbor_obs_batch.append(neighbor_obs[ind : ind + data_chunk_length])
+                neighbor_rnn_states_batch.append(neighbor_rnn_states[ind : ind + data_chunk_length])
                 neighbor_actions_batch.append(neighbor_actions[ind : ind + data_chunk_length])
                 neighbor_masks_batch.append(neighbor_masks[ind : ind + data_chunk_length])
                 neighbor_malicious_batch.append(neighbor_malicious[ind : ind + data_chunk_length])
@@ -402,6 +477,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             share_obs_batch = np.stack(share_obs_batch, axis=1)
             obs_batch = np.stack(obs_batch, axis=1)
             neighbor_obs_batch = np.stack(neighbor_obs_batch, axis=1)
+            neighbor_rnn_states_batch = np.stack(neighbor_rnn_states_batch, axis=1)
             neighbor_actions_batch = np.stack(neighbor_actions_batch, axis=1)
             neighbor_masks_batch = np.stack(neighbor_masks_batch, axis=1)
             neighbor_malicious_batch = np.stack(neighbor_malicious_batch, axis=1)
@@ -423,6 +499,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             share_obs_batch = _flatten(L, N, share_obs_batch)
             obs_batch = _flatten(L, N, obs_batch)
             neighbor_obs_batch = _flatten(L, N, neighbor_obs_batch)
+            neighbor_rnn_states_batch = _flatten(L, N, neighbor_rnn_states_batch)
             neighbor_actions_batch = _flatten(L, N, neighbor_actions_batch)
             neighbor_masks_batch = _flatten(L, N, neighbor_masks_batch)
             neighbor_malicious_batch = _flatten(L, N, neighbor_malicious_batch)
@@ -440,7 +517,7 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
             old_action_log_probs_batch = _flatten(L, N, old_action_log_probs_batch)
             adv_targ = _flatten(L, N, adv_targ)
 
-            yield (
+            sample = (
                 share_obs_batch,
                 obs_batch,
                 neighbor_obs_batch,
@@ -460,4 +537,26 @@ class SharedVITAReplayBuffer(SharedReplayBuffer):
                 adv_targ,
                 available_actions_batch,
             )
-
+            if self._include_neighbor_rnn_states:
+                sample = (
+                    share_obs_batch,
+                    obs_batch,
+                    neighbor_obs_batch,
+                    neighbor_rnn_states_batch,
+                    neighbor_actions_batch,
+                    neighbor_masks_batch,
+                    neighbor_channel_masks_batch,
+                    neighbor_channel_noise_batch,
+                    neighbor_malicious_batch,
+                    rnn_states_batch,
+                    rnn_states_critic_batch,
+                    actions_batch,
+                    value_preds_batch,
+                    return_batch,
+                    masks_batch,
+                    active_masks_batch,
+                    old_action_log_probs_batch,
+                    adv_targ,
+                    available_actions_batch,
+                )
+            yield sample

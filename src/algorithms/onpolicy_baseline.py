@@ -118,6 +118,8 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
     args += ["--max_grad_norm", str(_as_float(train_cfg.get("max_grad_norm", 10.0), name="train.max_grad_norm"))]
     args += ["--huber_delta", str(_as_float(train_cfg.get("huber_delta", 10.0), name="train.huber_delta"))]
 
+    if "recurrent_N" in train_cfg:
+        args += ["--recurrent_N", str(_as_int(train_cfg.get("recurrent_N"), name="train.recurrent_N"))]
     args += ["--data_chunk_length", str(_as_int(train_cfg.get("data_chunk_length", 10), name="train.data_chunk_length"))]
 
     if algorithm_name == "rvita":
