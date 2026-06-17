@@ -10,12 +10,12 @@ env:
   reward_scale: 1.0
   obs_noise_std: 0.0
   packet_drop_prob: 0.0
-  malicious_agent_prob: 0.2
-  malicious_obs_noise_scale: 0.1
+  malicious_agent_prob: 0.4
+  malicious_obs_noise_scale: 0.2
   malicious_obs_mode: add
   noise_warmup_steps: 0
   comm_noise_std: 0.0
-  comm_packet_drop_prob: 0.05
+  comm_packet_drop_prob: 0.0
   comm_malicious_agent_prob: 0.1
   comm_malicious_noise_scale: 0.05
   comm_malicious_mode: bernoulli
@@ -27,8 +27,8 @@ model:
   trust_gamma: 2.0
   kl_beta: 0.01
   kl_free_bits: 0.005
-  vib_consistency_weight: 0.01
-  vib_consistency_noise_std: 0.05
+  vib_consistency_weight: 0.0
+  vib_consistency_noise_std: 0.0
   attn_bias_coef: 0.5
   trust_lambda: 0.2
   trust_malicious_weight: 1.0
@@ -38,10 +38,10 @@ model:
   trust_reliability_mix: 0.8
   trust_utility_mix: 0.0
   trust_counterfactual_weight: 1.0
-  trust_consistency_mix: 0.5
-  trust_consistency_weight: 0.5
-  trust_consistency_margin: 0.05
-  trust_consistency_noise_std: 0.05
+  trust_consistency_mix: 0.0
+  trust_consistency_weight: 0.0
+  trust_consistency_margin: 0.0
+  trust_consistency_noise_std: 0.0
   trust_gate_floor: 0.0
   trust_gate_threshold: 0.45
   trust_malicious_gate_coef: 1.0

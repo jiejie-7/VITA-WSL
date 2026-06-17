@@ -1,0 +1,91 @@
+algorithm: vita
+seed: 1
+cuda: true
+
+env:
+  name: smac
+  map_name: MMM2
+  difficulty: "7"
+  num_envs: 8
+  reward_scale: 1.0
+  obs_noise_std: 0.0
+  packet_drop_prob: 0.0
+  malicious_agent_prob: 0.2
+  malicious_obs_noise_scale: 0.1
+  malicious_obs_mode: add
+  noise_warmup_steps: 0
+  comm_noise_std: 0.0
+  comm_packet_drop_prob: 0.05
+  comm_malicious_agent_prob: 0.1
+  comm_malicious_noise_scale: 0.05
+  comm_malicious_mode: bernoulli
+  comm_malicious_fixed_agent_id: 0
+
+model:
+  hidden_dim: 128
+  latent_dim: 32
+  trust_gamma: 2.0
+  kl_beta: 0.01
+  kl_free_bits: 0.005
+  vib_consistency_weight: 0.0
+  vib_consistency_noise_std: 0.0
+  attn_bias_coef: 0.5
+  trust_lambda: 0.2
+  trust_malicious_weight: 1.0
+  trust_margin_weight: 1.0
+  trust_margin: 0.1
+  trust_action_loss_weight: 0.2
+  trust_reliability_mix: 0.8
+  trust_utility_mix: 0.0
+  trust_counterfactual_weight: 1.0
+  trust_consistency_mix: 0.5
+  trust_consistency_weight: 0.5
+  trust_consistency_margin: 0.05
+  trust_consistency_noise_std: 0.05
+  trust_gate_floor: 0.0
+  trust_gate_threshold: 0.45
+  trust_malicious_gate_coef: 1.0
+  allocation_sharpness: 1.5
+  allocation_floor: 0.0
+  comm_dropout: 0.05
+  enable_trust: true
+  enable_kl: true
+  vib_deterministic: false
+  trust_hard_topk: true
+  trust_topk_k: 3
+  trust_pair_product: true
+  trust_gate_product: false
+  trust_decouple_allocation: true
+  trust_use_utility_for_gate: false
+  comm_sight_range: 9
+  max_neighbors: 5
+  history_length: 1
+
+train:
+  episode_length: 400
+  updates: 3125
+  lr: 0.0005
+  gain: 1
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_param: 0.2
+  ppo_epochs: 5
+  num_mini_batch: 2
+  entropy_coef: 0.01
+  value_loss_coef: 1.0
+  use_value_active_masks: false
+  max_grad_norm: 10.0
+  trust_delay_updates: 360
+  trust_warmup_updates: 180
+  trust_loss_delay_updates: 120
+  trust_loss_warmup_updates: 120
+  trust_gate_delay_updates: 480
+  trust_gate_warmup_updates: 240
+  kl_delay_updates: 1200
+  kl_warmup_updates: 1200
+  comm_delay_updates: 0
+  comm_warmup_updates: 120
+  comm_full_warmup_updates: 240
+  eval_interval_updates: 25
+  eval_episodes: 32
+  
