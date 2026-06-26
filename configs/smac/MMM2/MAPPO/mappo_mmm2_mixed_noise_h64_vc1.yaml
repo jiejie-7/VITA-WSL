@@ -1,5 +1,5 @@
 algorithm: mappo
-seed: 1
+seed: 3
 cuda: true
 
 env:

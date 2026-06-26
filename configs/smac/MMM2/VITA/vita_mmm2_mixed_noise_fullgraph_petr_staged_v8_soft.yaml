@@ -48,7 +48,7 @@ model:
   allocation_sharpness: 1.5
   allocation_floor: 0.0
   comm_dropout: 0.05
-  enable_trust: false
+  enable_trust: true
   enable_kl: true
   bypass_vib: false
   vib_deterministic: false
@@ -59,8 +59,8 @@ model:
   trust_gate_product: false
   trust_decouple_allocation: true
   trust_use_utility_for_gate: false
-  comm_sight_range: 9
-  max_neighbors: 5
+  comm_sight_range: 100.0
+  max_neighbors: 9
   history_length: 1
   belief_router:
     enable: true

@@ -151,6 +151,7 @@ class R_VITA:
             kl_loss,
             trust_loss,
             vib_consistency_loss,
+            belief_prior_loss,
             debug,
         ) = self.policy.evaluate_actions_vita(
             share_obs_batch,
@@ -191,6 +192,7 @@ class R_VITA:
                 + kl_coeff * kl_loss
                 + trust_coeff * trust_loss
                 + vib_consistency_loss
+                + belief_prior_loss
             ).backward()
 
         if self._use_max_grad_norm:
@@ -220,6 +222,7 @@ class R_VITA:
             kl_loss,
             trust_loss,
             vib_consistency_loss,
+            belief_prior_loss,
             debug,
         )
 
@@ -246,6 +249,13 @@ class R_VITA:
             "kl_raw": 0.0,
             "vib_consistency_loss": 0.0,
             "vib_consistency_raw": 0.0,
+            "belief_prior_loss": 0.0,
+            "belief_error": 0.0,
+            "belief_self_conf": 0.0,
+            "belief_comm_conf": 0.0,
+            "route_w_self": 0.0,
+            "route_w_social": 0.0,
+            "route_w_prior": 0.0,
             "trust_loss": 0.0,
             "trust_score_mean": 0.0,
             "trust_score_p10": 0.0,
@@ -287,6 +297,7 @@ class R_VITA:
                     kl_loss,
                     trust_loss,
                     vib_consistency_loss,
+                    belief_prior_loss,
                     debug,
                 ) = self.ppo_update(sample, update_actor)
 
@@ -299,8 +310,15 @@ class R_VITA:
                 train_info["kl"] += float(kl_loss.item())
                 train_info["trust_loss"] += float(trust_loss.item())
                 train_info["vib_consistency_loss"] += float(vib_consistency_loss.item())
+                train_info["belief_prior_loss"] += float(belief_prior_loss.item())
                 train_info["kl_raw"] += float(debug.get("kl_raw", 0.0))
                 train_info["vib_consistency_raw"] += float(debug.get("vib_consistency_raw", 0.0))
+                train_info["belief_error"] += float(debug.get("belief_error", 0.0))
+                train_info["belief_self_conf"] += float(debug.get("belief_self_conf", 0.0))
+                train_info["belief_comm_conf"] += float(debug.get("belief_comm_conf", 0.0))
+                train_info["route_w_self"] += float(debug.get("route_w_self", 0.0))
+                train_info["route_w_social"] += float(debug.get("route_w_social", 0.0))
+                train_info["route_w_prior"] += float(debug.get("route_w_prior", 0.0))
                 train_info["trust_score_mean"] += float(debug.get("trust_score_mean", 0.0))
                 train_info["trust_score_p10"] += float(debug.get("trust_score_p10", 0.0))
                 train_info["trust_score_p50"] += float(debug.get("trust_score_p50", 0.0))

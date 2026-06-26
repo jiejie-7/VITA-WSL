@@ -112,6 +112,7 @@ class R_VITAPolicy:
             comm_dropout=float(getattr(args, "vita_comm_dropout", 0.1)),
             enable_trust=not bool(getattr(args, "vita_disable_trust", False)),
             enable_kl=not bool(getattr(args, "vita_disable_kl", False)),
+            bypass_vib=bool(getattr(args, "vita_bypass_vib", False)),
             vib_deterministic=bool(getattr(args, "vita_vib_deterministic", False)),
             attention_only=bool(getattr(args, "vita_attention_only", False)),
             trust_hard_topk=bool(getattr(args, "vita_trust_hard_topk", False)),
@@ -126,6 +127,16 @@ class R_VITAPolicy:
             trust_use_utility_for_gate=not bool(getattr(args, "vita_trust_disable_utility_gate", False)),
             trust_gate_threshold=float(getattr(args, "vita_trust_gate_threshold", 0.0)),
             attn_bias_coef=float(getattr(args, "vita_attn_bias_coef", 1.0)),
+            enable_belief_router=bool(getattr(args, "vita_enable_belief_router", False)),
+            belief_router_tau=float(getattr(args, "vita_belief_router_tau", 3.0)),
+            belief_router_strength=float(getattr(args, "vita_belief_router_strength", 1.0)),
+            belief_router_self_floor=float(getattr(args, "vita_belief_router_self_floor", 0.1)),
+            belief_router_prior_weight=float(getattr(args, "vita_belief_router_prior_weight", 0.5)),
+            belief_router_social_weight=float(getattr(args, "vita_belief_router_social_weight", 1.0)),
+            belief_router_comm_quantile=float(getattr(args, "vita_belief_router_comm_quantile", 0.1)),
+            belief_router_social_cap=float(getattr(args, "vita_belief_router_social_cap", 0.6)),
+            belief_prior_loss_weight=float(getattr(args, "vita_belief_prior_loss_weight", 0.0)),
+            belief_prior_loss_min_conf=float(getattr(args, "vita_belief_prior_loss_min_conf", 0.05)),
         )
 
         self.agent = VITAAgent(agent_cfg).to(device)
@@ -147,6 +158,8 @@ class R_VITAPolicy:
                 trust_params,
                 comm_params,
                 self.agent.residual.parameters(),
+                self.agent.prior_norm.parameters(),
+                self.agent.prior_predictor.parameters(),
                 self.agent.neighbor_norm.parameters(),
                 self.agent.policy_head.parameters(),
             )
@@ -347,7 +360,16 @@ class R_VITAPolicy:
         masks,
         available_actions=None,
         active_masks=None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, float]]:
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Dict[str, float],
+    ]:
         cent_obs = check(cent_obs).to(device=self.device, dtype=torch.float32)
         obs = check(obs).to(device=self.device, dtype=torch.float32)
         rnn_states_actor = check(rnn_states_actor).to(device=self.device, dtype=torch.float32)
@@ -396,10 +418,18 @@ class R_VITAPolicy:
             kl_loss = eval_out["kl_loss"]
             trust_loss = eval_out["trust_loss"]
             vib_consistency_loss = eval_out["vib_consistency_loss"]
+            belief_prior_loss = eval_out["belief_prior_loss"]
             debug = {
                 "kl_raw": float(eval_out["kl_raw"].item()),
                 "vib_consistency_loss": float(eval_out["vib_consistency_loss"].item()),
                 "vib_consistency_raw": float(eval_out["vib_consistency_raw"].item()),
+                "belief_prior_loss": float(eval_out["belief_prior_loss"].item()),
+                "belief_error": float(eval_out["belief_error"].item()),
+                "belief_self_conf": float(eval_out["belief_self_conf"].item()),
+                "belief_comm_conf": float(eval_out["belief_comm_conf"].item()),
+                "route_w_self": float(eval_out["route_w_self"].item()),
+                "route_w_social": float(eval_out["route_w_social"].item()),
+                "route_w_prior": float(eval_out["route_w_prior"].item()),
                 "trust_score_mean": float(eval_out["trust_score_mean"].item()),
                 "trust_score_p10": float(eval_out["trust_score_p10"].item()),
                 "trust_score_p50": float(eval_out["trust_score_p50"].item()),
@@ -426,7 +456,7 @@ class R_VITAPolicy:
                 dist_entropy = (entropy * active_masks).sum() / denom
             else:
                 dist_entropy = entropy.mean()
-            return values, log_probs, dist_entropy, kl_loss, trust_loss, vib_consistency_loss, debug
+            return values, log_probs, dist_entropy, kl_loss, trust_loss, vib_consistency_loss, belief_prior_loss, debug
 
         # Sequence mode (T*N, ...) with initial hidden states (N, ...)
         N = rnn_states_actor.size(0)
@@ -458,8 +488,15 @@ class R_VITAPolicy:
         kl_list = []
         trust_list = []
         vib_consistency_list = []
+        belief_prior_list = []
         kl_raw_list = []
         vib_consistency_raw_list = []
+        belief_error_list = []
+        belief_self_conf_list = []
+        belief_comm_conf_list = []
+        route_w_self_list = []
+        route_w_social_list = []
+        route_w_prior_list = []
         trust_mean_list = []
         trust_p10_list = []
         trust_p50_list = []
@@ -509,8 +546,15 @@ class R_VITAPolicy:
             kl_list.append(eval_out["kl_loss"])
             trust_list.append(eval_out["trust_loss"])
             vib_consistency_list.append(eval_out["vib_consistency_loss"])
+            belief_prior_list.append(eval_out["belief_prior_loss"])
             kl_raw_list.append(eval_out["kl_raw"])
             vib_consistency_raw_list.append(eval_out["vib_consistency_raw"])
+            belief_error_list.append(eval_out["belief_error"])
+            belief_self_conf_list.append(eval_out["belief_self_conf"])
+            belief_comm_conf_list.append(eval_out["belief_comm_conf"])
+            route_w_self_list.append(eval_out["route_w_self"])
+            route_w_social_list.append(eval_out["route_w_social"])
+            route_w_prior_list.append(eval_out["route_w_prior"])
             trust_mean_list.append(eval_out["trust_score_mean"])
             trust_p10_list.append(eval_out["trust_score_p10"])
             trust_p50_list.append(eval_out["trust_score_p50"])
@@ -540,8 +584,15 @@ class R_VITAPolicy:
         kl_loss = torch.stack(kl_list, dim=0).mean()
         trust_loss = torch.stack(trust_list, dim=0).mean()
         vib_consistency_loss = torch.stack(vib_consistency_list, dim=0).mean()
+        belief_prior_loss = torch.stack(belief_prior_list, dim=0).mean()
         kl_raw = torch.stack(kl_raw_list, dim=0).mean()
         vib_consistency_raw = torch.stack(vib_consistency_raw_list, dim=0).mean()
+        belief_error = torch.stack(belief_error_list, dim=0).mean()
+        belief_self_conf = torch.stack(belief_self_conf_list, dim=0).mean()
+        belief_comm_conf = torch.stack(belief_comm_conf_list, dim=0).mean()
+        route_w_self = torch.stack(route_w_self_list, dim=0).mean()
+        route_w_social = torch.stack(route_w_social_list, dim=0).mean()
+        route_w_prior = torch.stack(route_w_prior_list, dim=0).mean()
         trust_score_mean = torch.stack(trust_mean_list, dim=0).mean()
         trust_score_p10 = torch.stack(trust_p10_list, dim=0).mean()
         trust_score_p50 = torch.stack(trust_p50_list, dim=0).mean()
@@ -562,6 +613,13 @@ class R_VITAPolicy:
             "kl_raw": float(kl_raw.item()),
             "vib_consistency_loss": float(vib_consistency_loss.item()),
             "vib_consistency_raw": float(vib_consistency_raw.item()),
+            "belief_prior_loss": float(belief_prior_loss.item()),
+            "belief_error": float(belief_error.item()),
+            "belief_self_conf": float(belief_self_conf.item()),
+            "belief_comm_conf": float(belief_comm_conf.item()),
+            "route_w_self": float(route_w_self.item()),
+            "route_w_social": float(route_w_social.item()),
+            "route_w_prior": float(route_w_prior.item()),
             "trust_score_mean": float(trust_score_mean.item()),
             "trust_score_p10": float(trust_score_p10.item()),
             "trust_score_p50": float(trust_score_p50.item()),
@@ -588,7 +646,7 @@ class R_VITAPolicy:
             dist_entropy = (entropy * active_masks.reshape(T * N, -1)).sum() / denom
         else:
             dist_entropy = entropy.mean()
-        return values, log_probs, dist_entropy, kl_loss, trust_loss, vib_consistency_loss, debug
+        return values, log_probs, dist_entropy, kl_loss, trust_loss, vib_consistency_loss, belief_prior_loss, debug
 
     def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic: bool = False):
         if self._neighbor_obs is None or self._neighbor_masks is None:

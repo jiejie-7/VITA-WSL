@@ -332,6 +332,8 @@ def get_config():
     parser.add_argument("--vita_max_neighbors", type=int, default=4)
     parser.add_argument("--vita_disable_trust", action="store_true", default=False)
     parser.add_argument("--vita_disable_kl", action="store_true", default=False)
+    parser.add_argument("--vita_bypass_vib", action="store_true", default=False,
+                        help="Completely bypass VIB message encoding/decoding and use hidden features as messages.")
     parser.add_argument("--vita_attention_only", action="store_true", default=False,
                         help="Bypass the variational bottleneck and use direct attention over neighbor features.")
     parser.add_argument("--vita_vib_deterministic", action="store_true", default=False,
@@ -340,6 +342,26 @@ def get_config():
                         help="Use hard top-k neighbor allocation during trust-gated communication.")
     parser.add_argument("--vita_trust_topk_k", type=int, default=0,
                         help="number of neighbors retained by VITA hard top-k trust allocation")
+    parser.add_argument("--vita_enable_belief_router", action="store_true", default=False,
+                        help="Enable prediction-error-guided routing over self/prior/trusted social features.")
+    parser.add_argument("--vita_belief_router_tau", type=float, default=3.0,
+                        help="Sharpness mapping self prediction error to self confidence.")
+    parser.add_argument("--vita_belief_router_strength", type=float, default=1.0,
+                        help="Blend strength for the belief router over the default residual fusion.")
+    parser.add_argument("--vita_belief_router_self_floor", type=float, default=0.1,
+                        help="Minimum self-observation score in belief routing.")
+    parser.add_argument("--vita_belief_router_prior_weight", type=float, default=0.5,
+                        help="Relative weight for temporal prior fallback under self/comm uncertainty.")
+    parser.add_argument("--vita_belief_router_social_weight", type=float, default=1.0,
+                        help="Relative weight for trust-filtered social information under self uncertainty.")
+    parser.add_argument("--vita_belief_router_comm_quantile", type=float, default=0.1,
+                        help="Lower reliability quantile used for conservative social confidence.")
+    parser.add_argument("--vita_belief_router_social_cap", type=float, default=0.6,
+                        help="Maximum route weight assigned to trust-filtered social information.")
+    parser.add_argument("--vita_belief_prior_loss_weight", type=float, default=0.0,
+                        help="Weight for confidence-weighted temporal prior prediction loss.")
+    parser.add_argument("--vita_belief_prior_loss_min_conf", type=float, default=0.05,
+                        help="Minimum confidence weight for the temporal prior prediction loss.")
 
     # VITA schedule (in 'updates', i.e., PPO updates/episodes in on-policy terms).
     parser.add_argument("--vita_trust_warmup_updates", type=int, default=0)

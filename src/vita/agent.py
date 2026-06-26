@@ -40,6 +40,7 @@ class VITAAgentConfig:
     comm_dropout: float = 0.1
     enable_trust: bool = True
     enable_kl: bool = True
+    bypass_vib: bool = False
     vib_deterministic: bool = False
     attention_only: bool = False
     trust_hard_topk: bool = False
@@ -54,6 +55,16 @@ class VITAAgentConfig:
     trust_decouple_allocation: bool = False
     trust_use_utility_for_gate: bool = True
     trust_gate_threshold: float = 0.0
+    enable_belief_router: bool = False
+    belief_router_tau: float = 3.0
+    belief_router_strength: float = 1.0
+    belief_router_self_floor: float = 0.1
+    belief_router_prior_weight: float = 0.5
+    belief_router_social_weight: float = 1.0
+    belief_router_comm_quantile: float = 0.1
+    belief_router_social_cap: float = 0.6
+    belief_prior_loss_weight: float = 0.0
+    belief_prior_loss_min_conf: float = 0.05
 
 
 class VITAAgent(torch.nn.Module):
@@ -69,9 +80,10 @@ class VITAAgent(torch.nn.Module):
             cfg.trust_gamma,
             pair_product=cfg.trust_pair_product,
         )
+        message_dim = cfg.hidden_dim if bool(cfg.bypass_vib) else cfg.latent_dim
         self.vib_gat = VIBGATLayer(
             cfg.hidden_dim,
-            cfg.latent_dim,
+            message_dim,
             cfg.kl_beta,
             cfg.attn_bias_coef,
             cfg.kl_free_bits,
@@ -90,6 +102,14 @@ class VITAAgent(torch.nn.Module):
         )
         self.policy_head = torch.nn.Linear(cfg.hidden_dim, cfg.action_dim)
         self.value_head = torch.nn.Linear(cfg.hidden_dim, 1)
+        self.prior_norm = torch.nn.LayerNorm(cfg.hidden_dim)
+        self.prior_predictor = torch.nn.Sequential(
+            torch.nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
+        )
+        torch.nn.init.zeros_(self.prior_predictor[-1].weight)
+        torch.nn.init.zeros_(self.prior_predictor[-1].bias)
         self.comm_enabled = True
         self.comm_strength = 0.0
         self.trust_strength = 0.0
@@ -127,12 +147,197 @@ class VITAAgent(torch.nn.Module):
     def _zero_scalar(self, ref: torch.Tensor) -> torch.Tensor:
         return torch.zeros(1, device=ref.device, dtype=ref.dtype)
 
+    def _zero_belief_debug(self, ref: torch.Tensor) -> Dict[str, torch.Tensor]:
+        zero = self._zero_scalar(ref)
+        return {
+            "belief_prior_loss": zero,
+            "belief_error": zero,
+            "belief_self_conf": zero,
+            "belief_comm_conf": zero,
+            "route_w_self": zero,
+            "route_w_social": zero,
+            "route_w_prior": zero,
+        }
+
     def _encode_neighbors(self, neighbor_seq: torch.Tensor) -> torch.Tensor:
         bsz, k, t, dim = neighbor_seq.shape
         flat = neighbor_seq.view(bsz * k, t, dim)
         feat, _ = self.comm_encoder(flat, None, None)
         feat = self.neighbor_norm(feat)
         return feat.view(bsz, k, -1)
+
+    def _predict_prior(
+        self,
+        rnn_states_actor: torch.Tensor,
+        masks: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if masks is None:
+            mask = torch.ones(
+                rnn_states_actor.size(0),
+                1,
+                device=rnn_states_actor.device,
+                dtype=rnn_states_actor.dtype,
+            )
+        else:
+            mask = torch.nan_to_num(masks, nan=0.0, posinf=1.0, neginf=0.0).view(rnn_states_actor.size(0), -1)
+            mask = mask[:, :1].clamp(0.0, 1.0)
+        prior_input = rnn_states_actor * mask
+        delta = self.prior_predictor(self.prior_norm(prior_input))
+        return prior_input + delta
+
+    def _compute_belief_prior(
+        self,
+        self_feat: torch.Tensor,
+        rnn_states_actor: torch.Tensor,
+        masks: torch.Tensor | None,
+        *,
+        training: bool,
+    ) -> Dict[str, torch.Tensor]:
+        if masks is None:
+            mask = torch.ones(
+                rnn_states_actor.size(0),
+                1,
+                device=rnn_states_actor.device,
+                dtype=rnn_states_actor.dtype,
+            )
+        else:
+            mask = torch.nan_to_num(masks, nan=0.0, posinf=1.0, neginf=0.0).view(rnn_states_actor.size(0), -1)
+            mask = mask[:, :1].clamp(0.0, 1.0)
+        prior_input = rnn_states_actor * mask
+        prior_available = prior_input.norm(dim=-1, keepdim=True) > 1e-6
+
+        prior_feat = self._predict_prior(rnn_states_actor, masks)
+        self_norm = F.normalize(torch.nan_to_num(self_feat), p=2, dim=-1)
+        prior_norm = F.normalize(torch.nan_to_num(prior_feat), p=2, dim=-1)
+        cosine = (self_norm * prior_norm).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
+        error = (0.5 * (1.0 - cosine)).clamp(0.0, 1.0)
+
+        reset_mask = mask <= 0.5
+        no_prior_mask = reset_mask | (~prior_available)
+        error = torch.where(no_prior_mask, torch.zeros_like(error), error)
+
+        tau = float(max(1e-6, getattr(self.cfg, "belief_router_tau", 3.0)))
+        self_conf = torch.exp(-tau * error).clamp(0.0, 1.0)
+        self_conf = torch.where(no_prior_mask, torch.ones_like(self_conf), self_conf)
+        context_conf = self_conf.detach()
+        receiver_context = context_conf * self_feat + (1.0 - context_conf) * prior_feat
+
+        prior_loss = self._zero_scalar(self_feat)
+        loss_weight = float(max(0.0, getattr(self.cfg, "belief_prior_loss_weight", 0.0)))
+        if training and loss_weight > 0.0 and bool(getattr(self.cfg, "enable_belief_router", False)):
+            min_conf = float(max(0.0, min(1.0, getattr(self.cfg, "belief_prior_loss_min_conf", 0.05))))
+            available_weight = prior_available.float().detach()
+            weight = self_conf.detach().clamp(min=min_conf, max=1.0) * available_weight
+            mse = (prior_norm - self_norm.detach()).pow(2).mean(dim=-1, keepdim=True)
+            denom = weight.sum().clamp_min(1.0)
+            prior_loss = loss_weight * (weight * mse).sum() / denom
+
+        return {
+            "prior_feat": prior_feat,
+            "receiver_context": receiver_context,
+            "self_conf": self_conf,
+            "belief_error": error,
+            "belief_prior_loss": prior_loss,
+        }
+
+    def _belief_route(
+        self,
+        self_feat: torch.Tensor,
+        comm_feat: torch.Tensor,
+        comm_out: Dict[str, torch.Tensor],
+        belief_out: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if not bool(getattr(self.cfg, "enable_belief_router", False)):
+            fused = self.residual(self_feat, comm_feat, self.comm_enabled, self.comm_strength)
+            debug = self._zero_belief_debug(self_feat)
+            debug["belief_prior_loss"] = belief_out.get("belief_prior_loss", self._zero_scalar(self_feat))
+            return fused, debug
+
+        prior_feat = belief_out["prior_feat"]
+        receiver_context = belief_out["receiver_context"]
+        self_conf = belief_out["self_conf"]
+        belief_error = belief_out["belief_error"]
+
+        social_feat = self.residual(receiver_context, comm_feat, self.comm_enabled, self.comm_strength)
+        edge_reliability = comm_out.get("edge_reliability")
+        edge_malicious_prob = comm_out.get("edge_malicious_prob")
+        edge_consistency = comm_out.get("edge_consistency")
+        edge_valid = comm_out.get("edge_valid_mask")
+        if edge_reliability is None or edge_valid is None:
+            comm_conf = torch.zeros_like(self_conf)
+        else:
+            valid = torch.nan_to_num(edge_valid, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+            reliability = torch.nan_to_num(edge_reliability, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            denom = valid.sum(dim=1).clamp_min(1.0)
+            mean_reliability = (reliability * valid).sum(dim=1) / denom
+            valid_bool = valid.squeeze(-1) > 0.5
+            masked_reliability = reliability.squeeze(-1).masked_fill(~valid_bool, 2.0)
+            q = float(max(0.0, min(1.0, getattr(self.cfg, "belief_router_comm_quantile", 0.1))))
+            sorted_reliability, _ = torch.sort(masked_reliability, dim=1)
+            valid_count = valid_bool.sum(dim=1, keepdim=True)
+            q_index = torch.floor(q * (valid_count.float() - 1.0).clamp_min(0.0)).long()
+            low_reliability = sorted_reliability.gather(1, q_index).clamp(0.0, 1.0)
+            low_reliability = torch.where(valid_count > 0, low_reliability, torch.zeros_like(low_reliability))
+            comm_conf = 0.5 * mean_reliability + 0.5 * low_reliability
+            if edge_malicious_prob is not None:
+                malicious_prob = torch.nan_to_num(edge_malicious_prob, nan=1.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+                clean_prob = (1.0 - malicious_prob).clamp(0.0, 1.0)
+                clean_conf = (clean_prob * valid).sum(dim=1) / denom
+                comm_conf = comm_conf * clean_conf
+            if edge_consistency is not None:
+                consistency = torch.nan_to_num(edge_consistency, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+                consistency_conf = (consistency * valid).sum(dim=1) / denom
+                comm_conf = comm_conf * consistency_conf
+            has_valid = (valid.sum(dim=1) > 0.5).float()
+            comm_conf = comm_conf * has_valid
+        if (not self.comm_enabled) or float(self.comm_strength) <= 0.0:
+            comm_conf = torch.zeros_like(self_conf)
+        else:
+            comm_conf = comm_conf * float(self.comm_strength)
+        comm_conf = comm_conf.clamp(0.0, 1.0)
+
+        strength = float(max(0.0, min(1.0, getattr(self.cfg, "belief_router_strength", 1.0))))
+        self_floor = float(max(0.0, min(1.0, getattr(self.cfg, "belief_router_self_floor", 0.1))))
+        prior_weight = float(max(0.0, getattr(self.cfg, "belief_router_prior_weight", 0.5)))
+        social_weight = float(max(0.0, getattr(self.cfg, "belief_router_social_weight", 1.0)))
+        social_cap = float(max(0.0, min(1.0, getattr(self.cfg, "belief_router_social_cap", 0.6))))
+
+        route_self_conf = self_conf.detach()
+        route_comm_conf = comm_conf.detach()
+        uncertainty = (1.0 - route_self_conf).clamp(0.0, 1.0)
+        self_score = self_floor + (1.0 - self_floor) * route_self_conf
+        social_score = social_weight * uncertainty * route_comm_conf
+        prior_score = prior_weight * uncertainty * (1.0 - route_comm_conf)
+        scores = torch.cat([self_score, social_score, prior_score], dim=-1).clamp_min(1e-6)
+        weights = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        w_self = weights[:, 0:1]
+        w_social = weights[:, 1:2]
+        w_prior = weights[:, 2:3]
+        if social_cap < 1.0:
+            capped_social = w_social.clamp(max=social_cap)
+            overflow = w_social - capped_social
+            non_social = (w_self + w_prior).clamp_min(1e-6)
+            w_self = w_self + overflow * (w_self / non_social)
+            w_prior = w_prior + overflow * (w_prior / non_social)
+            w_social = capped_social
+            route_norm = (w_self + w_social + w_prior).clamp_min(1e-6)
+            w_self = w_self / route_norm
+            w_social = w_social / route_norm
+            w_prior = w_prior / route_norm
+
+        routed = w_self * self_feat + w_social * social_feat + w_prior * prior_feat
+        default_fused = self.residual(self_feat, comm_feat, self.comm_enabled, self.comm_strength)
+        fused = (1.0 - strength) * default_fused + strength * routed
+        debug = {
+            "belief_prior_loss": belief_out.get("belief_prior_loss", self._zero_scalar(self_feat)),
+            "belief_error": belief_error.mean(),
+            "belief_self_conf": self_conf.mean(),
+            "belief_comm_conf": comm_conf.mean(),
+            "route_w_self": w_self.mean(),
+            "route_w_social": w_social.mean(),
+            "route_w_prior": w_prior.mean(),
+        }
+        return fused, debug
 
     def _vib_consistency_loss(
         self,
@@ -146,6 +351,7 @@ class VITAAgent(torch.nn.Module):
             weight <= 0.0
             or noise_std <= 0.0
             or (not self.cfg.enable_kl)
+            or bool(self.cfg.bypass_vib)
             or bool(self.cfg.attention_only)
             or neighbor_seq.numel() == 0
         ):
@@ -466,7 +672,10 @@ class VITAAgent(torch.nn.Module):
         trust_batch = trust_batch * (1.0 - eye)
         comm_batch = base_comm_mask.unsqueeze(1).expand(B, K, K, 1).clone()
         comm_batch = comm_batch * (1.0 - eye)
-        feat_batch = self.vib_gat.decode_messages(msg_batch.reshape(B * K, K, D))
+        if bool(self.cfg.bypass_vib):
+            feat_batch = msg_batch.reshape(B * K, K, D)
+        else:
+            feat_batch = self.vib_gat.decode_messages(msg_batch.reshape(B * K, K, D))
         self_batch = self_feat.unsqueeze(1).expand(B, K, self_feat.size(-1)).reshape(B * K, self_feat.size(-1))
         comm_flat = self.vib_gat.aggregate_messages(
             self_batch,
@@ -495,6 +704,7 @@ class VITAAgent(torch.nn.Module):
         neighbor_next_actions: torch.Tensor | None,
         neighbor_malicious: torch.Tensor | None,
         avail_actions: torch.Tensor | None,
+        receiver_context: torch.Tensor | None = None,
         *,
         deterministic: bool,
         training: bool,
@@ -553,12 +763,22 @@ class VITAAgent(torch.nn.Module):
             recv_mask = torch.nan_to_num(channel_mask.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
             recv_mask = recv_mask * sender_mask
 
-        sender_messages, kl_loss, kl_raw, sender_uncertainty = self.vib_gat.encode_messages(
-            neighbor_feat,
-            sender_mask,
-            deterministic=deterministic,
-        )
-        if training:
+        if bool(self.cfg.bypass_vib):
+            sender_messages = neighbor_feat
+            kl_loss = self._zero_scalar(self_feat)
+            kl_raw = self._zero_scalar(self_feat)
+            sender_uncertainty = torch.zeros(
+                (*sender_messages.shape[:2], 1),
+                device=sender_messages.device,
+                dtype=sender_messages.dtype,
+            )
+        else:
+            sender_messages, kl_loss, kl_raw, sender_uncertainty = self.vib_gat.encode_messages(
+                neighbor_feat,
+                sender_mask,
+                deterministic=deterministic,
+            )
+        if training and not bool(self.cfg.bypass_vib):
             vib_consistency_loss, vib_consistency_raw = self._vib_consistency_loss(neighbor_seq, sender_mask)
         else:
             vib_consistency_loss = self._zero_scalar(self_feat)
@@ -566,12 +786,21 @@ class VITAAgent(torch.nn.Module):
         if channel_noise is None:
             recv_messages = sender_messages
         else:
+            if channel_noise.size(-1) != sender_messages.size(-1):
+                raise ValueError(
+                    f"channel_noise dim {channel_noise.size(-1)} does not match message dim {sender_messages.size(-1)}. "
+                    "For bypass_vib, set model.latent_dim to model.hidden_dim."
+                )
             recv_messages = sender_messages + torch.nan_to_num(channel_noise, nan=0.0, posinf=0.0, neginf=0.0)
         recv_messages = recv_messages * recv_mask
-        recv_feat = self.vib_gat.decode_messages(recv_messages)
+        if bool(self.cfg.bypass_vib):
+            recv_feat = recv_messages
+        else:
+            recv_feat = self.vib_gat.decode_messages(recv_messages)
 
+        trust_context = receiver_context if receiver_context is not None else self_feat
         trust_logits, malicious_logits, utility_logits, reliability, utility_score, consistency_score = self._compute_utility(
-            self_feat,
+            trust_context,
             recv_feat,
             sender_uncertainty,
         )
@@ -585,7 +814,7 @@ class VITAAgent(torch.nn.Module):
         if training and self.cfg.enable_trust:
             with torch.no_grad():
                 utility_targets = self._compute_counterfactual_utility(
-                    self_feat,
+                    trust_context,
                     recv_messages,
                     recv_mask,
                     recv_mask,
@@ -595,7 +824,7 @@ class VITAAgent(torch.nn.Module):
                 )
 
         comm_feat = self.vib_gat.aggregate_messages(
-            self_feat,
+            trust_context,
             recv_messages,
             attn_trust_mask,
             aggregate_mask,
@@ -764,6 +993,13 @@ class VITAAgent(torch.nn.Module):
         return_debug: bool = False,
     ) -> Dict[str, torch.Tensor]:
         self_feat, next_actor = self.actor_encoder(obs_seq, rnn_states_actor.unsqueeze(0), masks)
+        belief_out = self._compute_belief_prior(
+            self_feat,
+            rnn_states_actor,
+            masks,
+            training=False,
+        )
+        receiver_context = belief_out["receiver_context"] if bool(getattr(self.cfg, "enable_belief_router", False)) else None
         comm_out = self._comm_forward(
             self_feat,
             neighbor_seq,
@@ -773,11 +1009,12 @@ class VITAAgent(torch.nn.Module):
             neighbor_next_actions,
             neighbor_malicious=neighbor_malicious,
             avail_actions=avail_actions,
+            receiver_context=receiver_context,
             deterministic=bool(deterministic) or bool(self.cfg.vib_deterministic),
             training=False,
         )
 
-        fused = self.residual(self_feat, comm_out["comm_feat"], self.comm_enabled, self.comm_strength)
+        fused, belief_debug = self._belief_route(self_feat, comm_out["comm_feat"], comm_out, belief_out)
         logits = self._mask_logits(self.policy_head(fused), avail_actions)
         dist = Categorical(logits=logits)
         if deterministic:
@@ -797,9 +1034,11 @@ class VITAAgent(torch.nn.Module):
             "next_critic_state": next_critic,
             "kl_loss": comm_out["kl_loss"],
             "kl_raw": comm_out["kl_raw"],
+            "belief_prior_loss": belief_debug["belief_prior_loss"],
         }
         if return_debug:
             out.update(comm_out)
+            out.update(belief_debug)
         return out
 
     def evaluate_actions(
@@ -819,6 +1058,13 @@ class VITAAgent(torch.nn.Module):
         avail_actions: torch.Tensor | None,
     ) -> Dict[str, torch.Tensor]:
         self_feat, next_actor = self.actor_encoder(obs_seq, rnn_states_actor.unsqueeze(0), masks)
+        belief_out = self._compute_belief_prior(
+            self_feat,
+            rnn_states_actor,
+            masks,
+            training=True,
+        )
+        receiver_context = belief_out["receiver_context"] if bool(getattr(self.cfg, "enable_belief_router", False)) else None
         comm_out = self._comm_forward(
             self_feat,
             neighbor_seq,
@@ -828,11 +1074,12 @@ class VITAAgent(torch.nn.Module):
             neighbor_next_actions,
             neighbor_malicious,
             avail_actions=avail_actions,
+            receiver_context=receiver_context,
             deterministic=bool(self.cfg.vib_deterministic),
             training=True,
         )
 
-        fused = self.residual(self_feat, comm_out["comm_feat"], self.comm_enabled, self.comm_strength)
+        fused, belief_debug = self._belief_route(self_feat, comm_out["comm_feat"], comm_out, belief_out)
         logits = self._mask_logits(self.policy_head(fused), avail_actions)
         dist = Categorical(logits=logits)
         log_probs = dist.log_prob(actions.squeeze(-1)).unsqueeze(-1)
@@ -869,6 +1116,7 @@ class VITAAgent(torch.nn.Module):
             "residual_comm_ratio": residual_comm_ratio,
         }
         out.update(comm_out)
+        out.update(belief_debug)
         return out
 
     def get_values(

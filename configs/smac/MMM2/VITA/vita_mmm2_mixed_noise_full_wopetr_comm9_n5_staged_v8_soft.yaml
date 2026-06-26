@@ -48,7 +48,7 @@ model:
   allocation_sharpness: 1.5
   allocation_floor: 0.0
   comm_dropout: 0.05
-  enable_trust: false
+  enable_trust: true
   enable_kl: true
   bypass_vib: false
   vib_deterministic: false
@@ -63,7 +63,7 @@ model:
   max_neighbors: 5
   history_length: 1
   belief_router:
-    enable: true
+    enable: false
     tau: 3.0
     strength: 1.0
     self_floor: 0.1

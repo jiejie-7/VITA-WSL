@@ -16,8 +16,8 @@ env:
   noise_warmup_steps: 0
   comm_noise_std: 0.0
   comm_packet_drop_prob: 0.0
-  comm_malicious_agent_prob: 0.1
-  comm_malicious_noise_scale: 0.05
+  comm_malicious_agent_prob: 0.0
+  comm_malicious_noise_scale: 0.0
   comm_malicious_mode: bernoulli
   comm_malicious_fixed_agent_id: 0
 
@@ -48,9 +48,8 @@ model:
   allocation_sharpness: 1.5
   allocation_floor: 0.0
   comm_dropout: 0.05
-  enable_trust: false
+  enable_trust: true
   enable_kl: true
-  bypass_vib: false
   vib_deterministic: false
   attention_only: false
   trust_hard_topk: true

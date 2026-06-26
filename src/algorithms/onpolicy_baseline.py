@@ -46,6 +46,32 @@ def _flag_store_true(args: List[str], flag: str, desired: bool) -> None:
         args.append(f"--{flag}")
 
 
+def _append_vita_belief_router_args(args: List[str], model_cfg: Dict[str, Any]) -> None:
+    belief_cfg = model_cfg.get("belief_router") or {}
+    if not isinstance(belief_cfg, dict):
+        belief_cfg = {}
+
+    def _belief_value(long_key: str, short_key: str, default: Any) -> Any:
+        return belief_cfg.get(short_key, belief_cfg.get(long_key, model_cfg.get(long_key, default)))
+
+    enable = bool(_belief_value("enable_belief_router", "enable", False))
+    _flag_store_true(args, "vita_enable_belief_router", enable)
+    belief_args = [
+        ("belief_router_tau", "tau", 3.0, "vita_belief_router_tau"),
+        ("belief_router_strength", "strength", 1.0, "vita_belief_router_strength"),
+        ("belief_router_self_floor", "self_floor", 0.1, "vita_belief_router_self_floor"),
+        ("belief_router_prior_weight", "prior_weight", 0.5, "vita_belief_router_prior_weight"),
+        ("belief_router_social_weight", "social_weight", 1.0, "vita_belief_router_social_weight"),
+        ("belief_router_comm_quantile", "comm_quantile", 0.1, "vita_belief_router_comm_quantile"),
+        ("belief_router_social_cap", "social_cap", 0.6, "vita_belief_router_social_cap"),
+        ("belief_prior_loss_weight", "prior_loss_weight", 0.0, "vita_belief_prior_loss_weight"),
+        ("belief_prior_loss_min_conf", "prior_loss_min_conf", 0.05, "vita_belief_prior_loss_min_conf"),
+    ]
+    for long_key, short_key, default, cli_name in belief_args:
+        value = _belief_value(long_key, short_key, default)
+        args += [f"--{cli_name}", str(_as_float(value, name=f"model.{long_key}"))]
+
+
 def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[str]:
     env_cfg = cfg.get("env") or {}
     train_cfg = cfg.get("train") or {}
@@ -127,12 +153,16 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
         args += ["--stacked_frames", str(history_length)]
         _flag_store_true(args, "use_stacked_frames", history_length > 1)
 
-        args += ["--vita_latent_dim", str(_as_int(model_cfg.get("latent_dim", 64), name="model.latent_dim"))]
+        bypass_vib = bool(model_cfg.get("bypass_vib", False))
+        latent_dim = hidden_size if bypass_vib else _as_int(model_cfg.get("latent_dim", 64), name="model.latent_dim")
+        args += ["--vita_latent_dim", str(latent_dim)]
         args += ["--vita_trust_gamma", str(_as_float(model_cfg.get("trust_gamma", 1.0), name="model.trust_gamma"))]
         args += ["--vita_kl_beta", str(_as_float(model_cfg.get("kl_beta", 1e-3), name="model.kl_beta"))]
         args += ["--vita_kl_free_bits", str(_as_float(model_cfg.get("kl_free_bits", 0.0), name="model.kl_free_bits"))]
-        args += ["--vita_vib_consistency_weight", str(_as_float(model_cfg.get("vib_consistency_weight", 0.0), name="model.vib_consistency_weight"))]
-        args += ["--vita_vib_consistency_noise_std", str(_as_float(model_cfg.get("vib_consistency_noise_std", 0.0), name="model.vib_consistency_noise_std"))]
+        vib_consistency_weight = 0.0 if bypass_vib else _as_float(model_cfg.get("vib_consistency_weight", 0.0), name="model.vib_consistency_weight")
+        vib_consistency_noise_std = 0.0 if bypass_vib else _as_float(model_cfg.get("vib_consistency_noise_std", 0.0), name="model.vib_consistency_noise_std")
+        args += ["--vita_vib_consistency_weight", str(vib_consistency_weight)]
+        args += ["--vita_vib_consistency_noise_std", str(vib_consistency_noise_std)]
         args += ["--vita_attn_bias_coef", str(_as_float(model_cfg.get("attn_bias_coef", 1.0), name="model.attn_bias_coef"))]
         args += ["--vita_trust_lambda", str(_as_float(model_cfg.get("trust_lambda", 0.1), name="model.trust_lambda"))]
         args += ["--vita_trust_malicious_weight", str(_as_float(model_cfg.get("trust_malicious_weight", 1.0), name="model.trust_malicious_weight"))]
@@ -161,8 +191,10 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
         args += ["--vita_max_neighbors", str(_as_int(model_cfg.get("max_neighbors", 4), name="model.max_neighbors"))]
         if not bool(model_cfg.get("enable_trust", True)):
             _flag_store_true(args, "vita_disable_trust", True)
-        if not bool(model_cfg.get("enable_kl", True)):
+        if not bool(model_cfg.get("enable_kl", True)) or bypass_vib:
             _flag_store_true(args, "vita_disable_kl", True)
+        if bypass_vib:
+            _flag_store_true(args, "vita_bypass_vib", True)
         if bool(model_cfg.get("attention_only", False)):
             _flag_store_true(args, "vita_attention_only", True)
         if bool(model_cfg.get("vib_deterministic", False)):
@@ -175,6 +207,7 @@ def build_onpolicy_smac_args(cfg: Dict[str, Any], *, config_path: Path) -> List[
             _flag_store_true(args, "vita_trust_disable_utility_gate", True)
         args += ["--vita_trust_topk_k", str(_as_int(model_cfg.get("trust_topk_k", 0), name="model.trust_topk_k"))]
         args += ["--vita_trust_gate_threshold", str(_as_float(model_cfg.get("trust_gate_threshold", 0.0), name="model.trust_gate_threshold"))]
+        _append_vita_belief_router_args(args, model_cfg)
 
         trust_warmup = _as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates")
         trust_delay = _as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates")
@@ -320,12 +353,16 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
         args += ["--stacked_frames", str(history_length)]
         _flag_store_true(args, "use_stacked_frames", history_length > 1)
 
-        args += ["--vita_latent_dim", str(_as_int(model_cfg.get("latent_dim", 64), name="model.latent_dim"))]
+        bypass_vib = bool(model_cfg.get("bypass_vib", False))
+        latent_dim = hidden_size if bypass_vib else _as_int(model_cfg.get("latent_dim", 64), name="model.latent_dim")
+        args += ["--vita_latent_dim", str(latent_dim)]
         args += ["--vita_trust_gamma", str(_as_float(model_cfg.get("trust_gamma", 1.0), name="model.trust_gamma"))]
         args += ["--vita_kl_beta", str(_as_float(model_cfg.get("kl_beta", 1e-3), name="model.kl_beta"))]
         args += ["--vita_kl_free_bits", str(_as_float(model_cfg.get("kl_free_bits", 0.0), name="model.kl_free_bits"))]
-        args += ["--vita_vib_consistency_weight", str(_as_float(model_cfg.get("vib_consistency_weight", 0.0), name="model.vib_consistency_weight"))]
-        args += ["--vita_vib_consistency_noise_std", str(_as_float(model_cfg.get("vib_consistency_noise_std", 0.0), name="model.vib_consistency_noise_std"))]
+        vib_consistency_weight = 0.0 if bypass_vib else _as_float(model_cfg.get("vib_consistency_weight", 0.0), name="model.vib_consistency_weight")
+        vib_consistency_noise_std = 0.0 if bypass_vib else _as_float(model_cfg.get("vib_consistency_noise_std", 0.0), name="model.vib_consistency_noise_std")
+        args += ["--vita_vib_consistency_weight", str(vib_consistency_weight)]
+        args += ["--vita_vib_consistency_noise_std", str(vib_consistency_noise_std)]
         args += ["--vita_attn_bias_coef", str(_as_float(model_cfg.get("attn_bias_coef", 1.0), name="model.attn_bias_coef"))]
         args += ["--vita_trust_lambda", str(_as_float(model_cfg.get("trust_lambda", 0.1), name="model.trust_lambda"))]
         args += ["--vita_trust_malicious_weight", str(_as_float(model_cfg.get("trust_malicious_weight", 1.0), name="model.trust_malicious_weight"))]
@@ -354,8 +391,10 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
         args += ["--vita_max_neighbors", str(_as_int(model_cfg.get("max_neighbors", max(1, num_agents - 1)), name="model.max_neighbors"))]
         if not bool(model_cfg.get("enable_trust", True)):
             _flag_store_true(args, "vita_disable_trust", True)
-        if not bool(model_cfg.get("enable_kl", True)):
+        if not bool(model_cfg.get("enable_kl", True)) or bypass_vib:
             _flag_store_true(args, "vita_disable_kl", True)
+        if bypass_vib:
+            _flag_store_true(args, "vita_bypass_vib", True)
         if bool(model_cfg.get("attention_only", False)):
             _flag_store_true(args, "vita_attention_only", True)
         if bool(model_cfg.get("vib_deterministic", False)):
@@ -368,6 +407,7 @@ def build_onpolicy_football_args(cfg: Dict[str, Any], *, config_path: Path) -> L
             _flag_store_true(args, "vita_trust_disable_utility_gate", True)
         args += ["--vita_trust_topk_k", str(_as_int(model_cfg.get("trust_topk_k", 0), name="model.trust_topk_k"))]
         args += ["--vita_trust_gate_threshold", str(_as_float(model_cfg.get("trust_gate_threshold", 0.0), name="model.trust_gate_threshold"))]
+        _append_vita_belief_router_args(args, model_cfg)
 
         trust_warmup = _as_int(train_cfg.get("trust_warmup_updates", 0), name="train.trust_warmup_updates")
         trust_delay = _as_int(train_cfg.get("trust_delay_updates", 0), name="train.trust_delay_updates")

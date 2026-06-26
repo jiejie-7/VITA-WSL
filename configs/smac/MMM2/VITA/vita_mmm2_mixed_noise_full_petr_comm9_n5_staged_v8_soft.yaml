@@ -1,5 +1,5 @@
 algorithm: vita
-seed: 1
+seed: 3
 cuda: true
 
 env:
@@ -48,7 +48,7 @@ model:
   allocation_sharpness: 1.5
   allocation_floor: 0.0
   comm_dropout: 0.05
-  enable_trust: false
+  enable_trust: true
   enable_kl: true
   bypass_vib: false
   vib_deterministic: false
